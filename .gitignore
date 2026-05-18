@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Data — exclude everything. The data/ directory is for local files
+# only (real CSVs, business context docs, sync registries with real
+# customer IDs). Nothing in here is meant to live in the repo.
+data/
+
+# Saved artefacts contain real numbers / charts / reports from chats.
+saved/
+
+# Windows alternate-data-stream metadata, created when files are copied
+# from a downloaded archive. Never useful to commit.
+*:Zone.Identifier
+
+# Local user state lives in ~/.snoop-doc/ which is outside the repo, but
+# guard against anyone accidentally moving it in.
+.snoop-doc/

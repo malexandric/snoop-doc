@@ -1,0 +1,24 @@
+# Snoop Doc theme — Stripe-modern direction.
+#
+# Colors picked to evoke modern fintech (Stripe, Mercury, Linear-adjacent):
+#   - Primary: Stripe purple (placeholder until logo lands; easy to swap).
+#   - Background: pure white main area.
+#   - Sidebar / cards: soft off-white (#F6F9FC) to give subtle separation
+#     from the main area without being heavy.
+#   - Text: deep charcoal-navy, professional but not jet black.
+#
+# Detailed tweaks (button radius, spacing) live as CSS in app.py.
+
+[theme]
+base = "light"
+primaryColor = "#635BFF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F9FC"
+textColor = "#1A1F36"
+font = "sans serif"
+
+[client]
+# "minimal" hides Streamlit's developer menu + disables the dev keyboard
+# shortcuts (C = clear cache, R = rerun) that were intercepting Ctrl+C and
+# preventing normal copy. Keep this on for any user-facing build.
+toolbarMode = "minimal"

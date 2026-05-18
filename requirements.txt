@@ -1,0 +1,17 @@
+streamlit>=1.39
+anthropic>=0.40
+pandas>=2.2
+numpy>=1.26
+plotly>=5.20
+python-dotenv>=1.0
+
+# Google Sheets live sync (optional but recommended — wire up via Settings)
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.140
+
+# Stripe live sync (optional — wire up via Settings)
+stripe>=10.0
+
+# Markdown → HTML conversion for the Save-as-report feature
+markdown>=3.5
