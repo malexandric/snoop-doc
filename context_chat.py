@@ -97,8 +97,42 @@ _RUN_PYTHON_TOOL = {
     },
 }
 
+# General-mode run_python: identical signature, different framing — every
+# CSV in `data/tables/` is loaded into the sandbox under its sanitized
+# variable name, no `df` alias (there's no single subject file). Used
+# when writing group context docs that span many CSVs (e.g. a `pnl.md`
+# describing every P&L year, or a `stripe.md` describing the Stripe
+# tables together).
+_RUN_PYTHON_TOOL_GENERAL = {
+    "name": "run_python",
+    "description": (
+        "Inspect any of the CSVs in `data/tables/`. The sandbox has "
+        "`pd`, `np`, and a `load_table(name, nrows=20)` helper. Tables "
+        "are NOT pre-loaded — call `load_table('the_name')` for the "
+        "ones you need. Defaults to a 20-row sample (enough to see "
+        "columns, dtypes, currency formatting, and TOTAL-row patterns). "
+        "Pass `nrows=None` for a full load — do this only when you "
+        "actually need to count rows or verify a totals figure. The "
+        "*Available data tables* list below shows each table's "
+        "approximate row count + a sample-vs-full hint.\n\n"
+        "State persists across `run_python` calls within one chat turn "
+        "— a DataFrame you load in one call is still in scope on the "
+        "next."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "Python code to execute. Use print() to surface results.",
+            },
+        },
+        "required": ["code"],
+    },
+}
+
 TABLE_CHAT_TOOLS = [_RUN_PYTHON_TOOL, _UPDATE_DOC_TOOL]
-GENERAL_CHAT_TOOLS = [_UPDATE_DOC_TOOL]
+GENERAL_CHAT_TOOLS = [_RUN_PYTHON_TOOL_GENERAL, _UPDATE_DOC_TOOL]
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +172,13 @@ def open_for_general_new(md_name: str) -> None:
         f"I'm starting a new general context doc called `{md_name}`. "
         "Introduce yourself briefly, look at any other general context docs "
         "already in the project to see what's covered, and ask me what this "
-        "new doc should be about. Once I've described it, draft a first "
-        "version and we'll refine together."
+        "new doc should be about. If the doc will describe a group of data "
+        "files (e.g. a P&L doc covering multiple years), use `run_python` to "
+        "inspect the relevant CSVs in `data/tables/` once I tell you which "
+        "group to focus on — confirm column layouts, find aggregation traps, "
+        "and write the doc from what's actually in the data. Once I've "
+        "described what this doc should cover, draft a first version and "
+        "we'll refine together."
     )
 
 
@@ -421,23 +460,75 @@ These are the project's company-wide context files — they define departments, 
 """ if general_context else "")
 
 
+def _summarize_available_tables() -> str:
+    """One-line-per-table summary for the general-mode system prompt.
+
+    Built fresh each turn so newly-uploaded CSVs appear without
+    restarting the dialog. Uses `cheap_table_index` — line-counted row
+    estimates, no pandas reads — so this stays fast even with dozens
+    of multi-MB CSVs. The agent uses the row count to decide whether
+    to load a table whole or just sample it.
+    """
+    index = tools.cheap_table_index()
+    if not index:
+        return "(No CSVs in `data/tables/` yet.)"
+    lines: list[str] = []
+    for name, (path, row_count) in index.items():
+        if row_count is None:
+            lines.append(f"  - `{name}` (from `{path.name}`) — could not read")
+            continue
+        # Hint sample-vs-full strategy directly so the agent doesn't
+        # have to guess from raw numbers. The 1k threshold is arbitrary
+        # but matches real-world finance CSVs: P&Ls top out at low
+        # hundreds of rows; Stripe tables on real accounts are 10k+.
+        size_hint = "small — full-load ok" if row_count < 1000 else "big — sample only"
+        lines.append(
+            f"  - `{name}` (from `{path.name}`) — ~{row_count:,} rows ({size_hint})"
+        )
+    return "\n".join(lines)
+
+
 def _general_system_prompt(md_name: str, current_doc: str) -> str:
     other_general = _load_general_docs(exclude_filename=md_name)
+    tables_summary = _summarize_available_tables()
     return f"""You help users write a clear, concise GENERAL context document for the Snoop Doc app.
 
-General context docs describe company-wide facts that the downstream AI assistant needs across every conversation: org structure, brand or product portfolio, fiscal calendar, currency conventions, glossary of internal terms, accounting principles. They are loaded into the main agent's system prompt on every turn, so brevity matters — every line should be actionable.
+General context docs describe company-wide facts that the downstream AI assistant needs across every conversation: org structure, brand or product portfolio, fiscal calendar, currency conventions, glossary of internal terms, accounting principles. They can also describe **groups of data files** — e.g. a `pnl.md` covering every year of P&L, a `stripe.md` covering the Stripe tables. Group docs are how the main agent learns each file's schema and conventions without seeing raw column lists, so they need to be precise.
+
+All general docs are loaded into the main agent's system prompt on every turn, so brevity matters — every line should be actionable.
 
 **File being documented:** `{md_name}`
 
 ## How you should behave
 
 - **Ask focused questions** to fill gaps. Don't ask the user to re-explain things already covered in another general doc.
+- **Use `run_python` when documenting a file group.** If the doc you're writing covers a set of CSVs (P&L years, per-product P&Ls, Stripe tables, etc.), inspect the actual files before describing them — confirm column names, check whether the layout is identical across years, look for the aggregation traps the main agent will hit. Don't describe data you haven't looked at.
 - **Use `update_context_doc`** to draft or refine the doc as you learn things. Always pass the full content (the tool replaces the doc wholesale). The user sees your updates immediately.
 - **Keep the doc short.** Aim for under 600 words. Prefer headings + bullets to paragraphs.
 - **Never invent facts.** If the user doesn't know something, leave it out — silence beats guessing.
 - **Watch for conflicts and duplication with the other general docs.** If something is already documented elsewhere, point that out — don't restate it. If you spot a contradiction between what the user is telling you and what an existing general doc says, flag it before writing anything.
 - **Acknowledge when done.** When the doc is solid and you've no more questions, say so — the user can save when they're ready.
 - **Keep chat replies short.** Save the prose for the doc itself.
+
+## What a group-doc should cover
+
+When the doc is documenting a file group (rather than pure reference material like org structure), make sure it includes:
+
+1. **Which files belong to the group** — list them by sanitized name (e.g. `company_pnl_2024`, `company_pnl_2025`, `company_pnl_2026`) so the main agent can match them.
+2. **Loading recipe** — the right `pd.read_csv` invocation if the files have quirks (encoding, multi-row header, separator), plus post-load cleanup the agent should do.
+3. **Column conventions** — name the columns that matter and explain what they mean. If the column names are messy or inconsistent across years, that's exactly what you should call out and explain how to handle.
+4. **Aggregation traps** — every place naive aggregation would double-count: TOTAL columns mixed with line items, subtotal rows, currency-formatted strings, etc. For each trap, give the right pattern.
+5. **Canonical query snippets** — one-line examples for the common questions the main agent will get (`"Q1 revenue: ..."`). More valuable than column descriptions in isolation.
+
+If the doc isn't a group-doc (it's reference text like a glossary or fiscal-calendar note), ignore the above and focus on the facts.
+
+## Available data tables
+
+Use `load_table(name, nrows=20)` inside `run_python` to inspect any of these. The default 20-row sample is plenty for column names, dtypes, currency formatting, and TOTAL-row patterns — most schema-doc claims can be verified from a sample alone. Pass `nrows=None` for a full load only when you genuinely need to count rows or verify a totals figure (rare).
+
+Each line below shows the file's approximate row count and a strategy hint:
+
+{tables_summary}
 
 ## Current doc content
 
@@ -486,7 +577,11 @@ def _run_chat_turn(user_text: str) -> None:
         system_prompt = _general_system_prompt(
             target, st.session_state.get("_ctx_chat_doc", "")
         )
-        sandbox = None
+        # Lightweight sandbox — no DataFrames pre-loaded. The agent calls
+        # `load_table(name)` on demand, which defaults to a 20-row
+        # sample. Avoids paying full pd.read_csv on ~80 files per turn
+        # when the doc only touches a handful.
+        sandbox = tools.build_general_doc_sandbox()
         chat_tools = GENERAL_CHAT_TOOLS
 
     client = anthropic.Anthropic(api_key=api_key)
@@ -576,18 +671,17 @@ def _run_chat_turn(user_text: str) -> None:
             elif block.name == "run_python":
                 code = block.input.get("code", "")
                 if sandbox is None:
-                    # General mode: run_python isn't exposed in the tools
-                    # list, so the model shouldn't be calling it. If it
-                    # does (older context, hallucination), refuse cleanly.
+                    # No sandbox set up at all — shouldn't happen now
+                    # that general mode also seeds one. Defensive bail
+                    # in case a future mode forgets to build one.
                     tool_results.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
                             "content": (
-                                "Error: run_python is not available when "
-                                "editing a general context doc — there's "
-                                "no data file to analyse. Ask the user "
-                                "for the information instead."
+                                "Error: run_python is not available in "
+                                "this chat mode. Ask the user for the "
+                                "information instead."
                             ),
                         }
                     )

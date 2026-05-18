@@ -83,6 +83,27 @@ def discover_tables() -> dict[str, Path]:
     return result
 
 
+def _cheap_row_count(path: Path) -> int | None:
+    """Approximate data-row count via line count (header excluded).
+    Microseconds even on 100MB files — no pandas read. Off-by-one for
+    files with multi-line cells, which is fine for the
+    "sample vs full-load" decision the doc-editor agent makes from
+    this number. Returns None on OSError."""
+    try:
+        with path.open("rb") as f:
+            n = sum(1 for _ in f)
+        return max(0, n - 1)
+    except OSError:
+        return None
+
+
+def cheap_table_index() -> dict[str, tuple[Path, int | None]]:
+    """`{sanitized_name: (path, approx_row_count)}` for every CSV in
+    data/tables/. Cheap enough to call every doc-editor turn — no
+    pd.read_csv on any file."""
+    return {name: (path, _cheap_row_count(path)) for name, path in discover_tables().items()}
+
+
 def _read_csv_robust(path: Path) -> pd.DataFrame | None:
     """Try to read a CSV with the most common encodings before giving up.
 
@@ -315,6 +336,60 @@ def build_initial_namespace(
     if extra_globals:
         namespace.update(extra_globals)
     return namespace
+
+
+def build_general_doc_sandbox() -> dict:
+    """Lightweight sandbox for the general-mode AI context editor.
+
+    No DataFrames are pre-loaded — the agent calls `load_table(name)`
+    on demand. This matters when there are dozens of CSVs (e.g. 14
+    Stripe tables + 4 years of P&L + 17 products × 3 years of
+    per-product P&L = ~80 files) and the doc being edited only touches
+    a handful. Eager loading would cost a full pd.read_csv on every
+    file each turn for no benefit.
+
+    `load_table(name, nrows=20)` defaults to a 20-row sample —
+    plenty to see column names, dtypes, multi-row header layout,
+    currency formatting, and the presence of TOTAL/section-divider
+    rows. The agent passes `nrows=None` for a full load only when it
+    needs to verify a count or check a specific totals row. The
+    system prompt lists each table's approximate row count via
+    `cheap_table_index()` so the agent can decide sample vs full per
+    table.
+    """
+    discovered = discover_tables()
+
+    def load_table(name: str, nrows: int | None = 20) -> pd.DataFrame:
+        """Read a CSV from data/tables/. Defaults to a 20-row sample
+        so big files don't cost a full read on every inspection. Pass
+        `nrows=None` to load the whole file (use only when you need
+        to count or verify totals).
+        """
+        if name not in discovered:
+            available = sorted(discovered.keys())
+            raise ValueError(
+                f"Unknown table: {name!r}. Available: {available}"
+            )
+        path = discovered[name]
+        for encoding in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+            try:
+                return pd.read_csv(path, encoding=encoding, nrows=nrows)
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                raise IOError(
+                    f"Could not read {path.name}: {type(e).__name__}: {e}"
+                ) from e
+        raise IOError(f"Could not read {path.name} with any common encoding.")
+
+    return {
+        "pd": pd,
+        "np": np,
+        "px": px,
+        "go": go,
+        "load_table": load_table,
+        "available_tables": sorted(discovered.keys()),
+    }
 
 
 def execute(code: str, namespace: dict | None = None) -> ExecResult:
