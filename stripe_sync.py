@@ -274,15 +274,51 @@ def _flatten_customer(c) -> dict:
     }
 
 
+def _subscription_period(s) -> tuple[int | None, int | None]:
+    """Pull `(current_period_start, current_period_end)` off a subscription
+    across API versions.
+
+    Stripe deprecated the top-level `subscription.current_period_*` fields
+    when multi-price subscriptions became first-class — different items in
+    one subscription can have different billing periods. The values now
+    live under each item: `subscription.items.data[N].current_period_start/
+    end`. For a single-price sub the per-item period equals the old
+    top-level value; for multi-price, take the encompassing range
+    (earliest start, latest end) so a downstream "is this period live?"
+    check still works.
+
+    Falls back to the legacy top-level fields for older API versions.
+    """
+    items = getattr(s, "items", None)
+    items_data = getattr(items, "data", None) if items is not None else None
+    starts: list[int] = []
+    ends: list[int] = []
+    if items_data:
+        for it in items_data:
+            cs = getattr(it, "current_period_start", None)
+            ce = getattr(it, "current_period_end", None)
+            if cs is not None:
+                starts.append(cs)
+            if ce is not None:
+                ends.append(ce)
+    if starts and ends:
+        return min(starts), max(ends)
+    return (
+        getattr(s, "current_period_start", None),
+        getattr(s, "current_period_end", None),
+    )
+
+
 def _flatten_subscription(s) -> dict:
+    period_start, period_end = _subscription_period(s)
     return {
         "id": s.id,
         "customer_id": s.customer if isinstance(s.customer, str) else s.customer.id,
         "status": s.status,
         "created": _ts_to_iso(s.created),
         "start_date": _ts_to_iso(s.start_date),
-        "current_period_start": _ts_to_iso(getattr(s, "current_period_start", None)),
-        "current_period_end": _ts_to_iso(getattr(s, "current_period_end", None)),
+        "current_period_start": _ts_to_iso(period_start),
+        "current_period_end": _ts_to_iso(period_end),
         "cancel_at": _ts_to_iso(getattr(s, "cancel_at", None)),
         "canceled_at": _ts_to_iso(getattr(s, "canceled_at", None)),
         "cancel_at_period_end": getattr(s, "cancel_at_period_end", None),
@@ -318,6 +354,111 @@ def _flatten_subscription_items(s) -> list[dict]:
     return out
 
 
+def _invoice_subscription_id(inv) -> str | None:
+    """Pull the subscription ID off an invoice across API versions.
+
+    The legacy top-level `invoice.subscription` field was deprecated by
+    Stripe and on newer API versions returns None. The reference now
+    lives at `invoice.parent.subscription_details.subscription` (for
+    invoices whose `parent.type` is `"subscription_details"`). Quote-
+    and one-off-invoice rows have no parent.subscription_details and
+    correctly return None.
+
+    Try the new path first, fall back to the legacy field for older
+    accounts and older API versions still on the deprecated field.
+    """
+    parent = getattr(inv, "parent", None)
+    if parent is not None:
+        details = (
+            parent.get("subscription_details") if isinstance(parent, dict)
+            else getattr(parent, "subscription_details", None)
+        )
+        if details is not None:
+            sub_ref = (
+                details.get("subscription") if isinstance(details, dict)
+                else getattr(details, "subscription", None)
+            )
+            sub_id = _id_of(sub_ref)
+            if sub_id:
+                return sub_id
+    legacy = getattr(inv, "subscription", None)
+    return _id_of(legacy)
+
+
+def _nested(obj, *keys):
+    """Walk a chain of nested attributes / dict keys, returning None as
+    soon as any step is missing. `_nested(li, "parent", "subscription_item_details",
+    "subscription")` handles both StripeObject (attribute) and plain
+    dict (key) shapes at every level — the SDK can return either."""
+    cur = obj
+    for key in keys:
+        if cur is None:
+            return None
+        cur = cur.get(key) if isinstance(cur, dict) else getattr(cur, key, None)
+    return cur
+
+
+def _line_item_price_id(li) -> str | None:
+    """`line_item.price` was moved to `line_item.pricing.price_details.price`
+    on newer API versions. Try the new path first, fall back to the
+    legacy top-level `price` (which used to be a Price object or string
+    ID)."""
+    new = _nested(li, "pricing", "price_details", "price")
+    if new:
+        return _id_of(new)
+    return _id_of(getattr(li, "price", None))
+
+
+def _line_item_product_id(li) -> str | None:
+    """`product_id` derived from the price. Modern path is
+    `line_item.pricing.price_details.product`; legacy derived it from the
+    expanded `line_item.price.product`."""
+    new = _nested(li, "pricing", "price_details", "product")
+    if new:
+        return _id_of(new)
+    legacy_price = getattr(li, "price", None)
+    if legacy_price and not isinstance(legacy_price, str):
+        return _id_of(getattr(legacy_price, "product", None))
+    return None
+
+
+def _line_item_proration(li) -> bool | None:
+    """`line_item.proration` moved to
+    `line_item.parent.<subscription_item_details|invoice_item_details>.proration`.
+    Both detail blocks can carry it depending on the line's origin."""
+    for branch in ("subscription_item_details", "invoice_item_details"):
+        val = _nested(li, "parent", branch, "proration")
+        if val is not None:
+            return val
+    return getattr(li, "proration", None)
+
+
+def _line_item_type(li) -> str | None:
+    """`line_item.type` moved into `line_item.parent.type` with renamed
+    values: `"subscription_item_details"` and `"invoice_item_details"`.
+    Map back to the legacy `"subscription"` / `"invoiceitem"` values so
+    downstream code doesn't have to know the new enum."""
+    parent_type = _nested(li, "parent", "type")
+    if parent_type == "subscription_item_details":
+        return "subscription"
+    if parent_type == "invoice_item_details":
+        return "invoiceitem"
+    return getattr(li, "type", None)
+
+
+def _line_item_subscription_id(li) -> str | None:
+    """Pull the subscription ID off an invoice line item across API
+    versions. Same migration as `_invoice_subscription_id` — Stripe
+    moved the reference to `line_item.parent.subscription_item_details
+    .subscription` and the top-level `subscription` field is no longer
+    populated on modern accounts. One-off invoiceitem lines return None
+    in both schemas."""
+    new = _nested(li, "parent", "subscription_item_details", "subscription")
+    if new:
+        return _id_of(new)
+    return _id_of(getattr(li, "subscription", None))
+
+
 def _flatten_invoice(inv) -> dict:
     transitions = getattr(inv, "status_transitions", None) or {}
     def _tr(field):
@@ -327,7 +468,7 @@ def _flatten_invoice(inv) -> dict:
     return {
         "id": inv.id,
         "customer_id": inv.customer if isinstance(inv.customer, str) else (inv.customer.id if inv.customer else None),
-        "subscription_id": getattr(inv, "subscription", None),
+        "subscription_id": _invoice_subscription_id(inv),
         "status": inv.status,
         "created": _ts_to_iso(inv.created),
         "period_start": _ts_to_iso(getattr(inv, "period_start", None)),
@@ -504,8 +645,7 @@ def _flatten_coupon(c) -> dict:
 
 
 def _flatten_promotion_code(pc) -> dict:
-    coupon = getattr(pc, "coupon", None)
-    coupon_id = coupon.id if coupon and not isinstance(coupon, str) else coupon
+    coupon_id = _id_of(getattr(pc, "coupon", None))
     restrictions = getattr(pc, "restrictions", None) or {}
     return {
         "id": pc.id,
@@ -545,9 +685,6 @@ def _flatten_payout(p) -> dict:
 
 
 def _flatten_invoice_line_item(li, invoice_id: str) -> dict:
-    price = getattr(li, "price", None)
-    price_id = price.id if price and not isinstance(price, str) else price
-    product_id = (getattr(price, "product", None) if price and not isinstance(price, str) else None)
     # The `period` field is a small object with start + end Unix timestamps.
     period = getattr(li, "period", None)
     if isinstance(period, dict):
@@ -561,19 +698,22 @@ def _flatten_invoice_line_item(li, invoice_id: str) -> dict:
     return {
         "id": li.id,
         "invoice_id": invoice_id,
-        # `subscription` field is on lines tied to subscription items; one-off
-        # invoice items don't have it.
-        "subscription_id": getattr(li, "subscription", None),
-        "price_id": price_id,
-        "product_id": product_id,
+        # On modern Stripe API every reference field on a line item moved
+        # under `parent.<*_item_details>` (subscription, proration) or
+        # `pricing.price_details` (price, product); see the
+        # `_line_item_*` helpers. They fall back to the legacy top-level
+        # fields so older accounts keep working.
+        "subscription_id": _line_item_subscription_id(li),
+        "price_id": _line_item_price_id(li),
+        "product_id": _line_item_product_id(li),
         "amount": getattr(li, "amount", None),
         "currency": getattr(li, "currency", None),
         "description": getattr(li, "description", None),
         "quantity": getattr(li, "quantity", None),
         "period_start": period_start,
         "period_end": period_end,
-        "proration": getattr(li, "proration", None),
-        "type": getattr(li, "type", None),  # "subscription" or "invoiceitem"
+        "proration": _line_item_proration(li),
+        "type": _line_item_type(li),  # "subscription" or "invoiceitem"
     }
 
 
