@@ -10,6 +10,7 @@ import base64
 import html
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -1176,6 +1177,66 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Chat rendering helpers
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Confidence + source-reference badge
+# ---------------------------------------------------------------------------
+_CONFIDENCE_RE = re.compile(
+    r"<snoop-confidence>(.*?)</snoop-confidence>", re.DOTALL
+)
+
+_CONFIDENCE_STYLE = {
+    "high":   ("#065F46", "#D1FAE5", "#6EE7B7", "High"),
+    "medium": ("#92400E", "#FEF3C7", "#FCD34D", "Medium"),
+    "low":    ("#991B1B", "#FEE2E2", "#FCA5A5", "Low"),
+}
+
+
+def _parse_confidence(text: str) -> tuple[str, dict | None]:
+    """Strip the <snoop-confidence> block from *text* and return
+    (clean_text, parsed_dict).  Returns (text, None) when no block is found."""
+    m = _CONFIDENCE_RE.search(text)
+    if not m:
+        return text, None
+    try:
+        data = json.loads(m.group(1).strip())
+    except json.JSONDecodeError:
+        data = None
+    clean = _CONFIDENCE_RE.sub("", text).rstrip()
+    return clean, data
+
+
+def _render_confidence_badge(conf: dict) -> None:
+    """Render a colour-coded confidence + source-references card."""
+    level = (conf.get("level") or "").lower()
+    reason = conf.get("reason", "")
+    sources: list[str] = conf.get("sources") or []
+
+    text_color, bg_color, border_color, label = _CONFIDENCE_STYLE.get(
+        level, ("#1A1F36", "#F6F9FC", "#E3E8EE", level.capitalize() or "Unknown")
+    )
+
+    sources_html = ""
+    if sources:
+        tags = "".join(
+            f'<span style="background:#EEF2FF;color:#3730A3;border-radius:3px;'
+            f'padding:1px 7px;font-size:0.75rem;margin-right:4px;">{s}</span>'
+            for s in sources
+        )
+        sources_html = (
+            f'<div style="margin-top:5px;font-size:0.75rem;color:#697386;">'
+            f'Sources:&nbsp;{tags}</div>'
+        )
+
+    st.markdown(
+        f'<div style="border-left:3px solid {border_color};background:{bg_color};'
+        f'border-radius:0 6px 6px 0;padding:7px 12px;margin-top:10px;">'
+        f'<span style="font-weight:600;font-size:0.8rem;color:{text_color};">&#9679; {label} confidence</span>'
+        f'<span style="font-size:0.8rem;color:#697386;margin-left:8px;">{html.escape(reason)}</span>'
+        f'{sources_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_copy_button(text: str) -> None:
     """A small clipboard button rendered inside an iframe so its inline JS
     runs without being blocked by Streamlit's page-level CSP.
@@ -1301,11 +1362,14 @@ def _render_exchange_action_row(
 
 def _assistant_text_for_copy(content) -> str:
     """Extract a plain-markdown version of an assistant message for clipboard.
-    Handles both string content and Anthropic block-list content."""
+    Strips <snoop-confidence> blocks so raw tags never land in the clipboard."""
     if isinstance(content, str):
-        return content
+        return _CONFIDENCE_RE.sub("", content).rstrip()
     if isinstance(content, list):
-        parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+        parts = [
+            _CONFIDENCE_RE.sub("", b.get("text", "")).rstrip()
+            for b in content if b.get("type") == "text"
+        ]
         return "\n\n".join(p for p in parts if p)
     return ""
 
@@ -1330,7 +1394,11 @@ def _render_block_in_assistant_bubble(block: dict, key_suffix: str) -> None:
     btype = block.get("type")
 
     if btype == "text":
-        st.markdown(_md_chat(block.get("text", "")))
+        raw = block.get("text", "")
+        clean, conf = _parse_confidence(raw)
+        st.markdown(_md_chat(clean))
+        if conf:
+            _render_confidence_badge(conf)
 
     elif btype == "tool_use":
         name = block.get("name", "")
