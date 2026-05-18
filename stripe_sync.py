@@ -309,6 +309,18 @@ def _subscription_period(s) -> tuple[int | None, int | None]:
     )
 
 
+def _subscription_discount_id(s) -> str | None:
+    """`subscription.discount` (singular) was deprecated by Stripe in
+    favor of `subscription.discounts` (a list, supporting stacked
+    discounts). On modern API versions only the list is populated; on
+    older versions only the singular field. Return the first discount's
+    id from whichever shape is present."""
+    discounts = getattr(s, "discounts", None)
+    if discounts:
+        return _id_of(discounts[0])
+    return _id_of(getattr(s, "discount", None))
+
+
 def _flatten_subscription(s) -> dict:
     period_start, period_end = _subscription_period(s)
     return {
@@ -328,8 +340,7 @@ def _flatten_subscription(s) -> dict:
         "collection_method": getattr(s, "collection_method", None),
         "currency": getattr(s, "currency", None),
         "default_payment_method_id": getattr(s, "default_payment_method", None),
-        "discount_id": (getattr(getattr(s, "discount", None), "id", None)
-                        if getattr(s, "discount", None) else None),
+        "discount_id": _subscription_discount_id(s),
     }
 
 
@@ -489,6 +500,24 @@ def _flatten_invoice(inv) -> dict:
     }
 
 
+def _payment_intent_invoice_id(pi) -> str | None:
+    """`pi.invoice` was removed from the top level on newer Stripe API
+    versions. The invoice reference moved into a generic
+    `pi.payment_details.order_reference` slot — a string of the form
+    `in_...` when the PI was created to pay an invoice (subscription
+    billing, manual invoice payment), or absent/None for one-off
+    charges + Checkout-session-driven payments. Falls back to the
+    legacy top-level `invoice` for older API versions.
+    """
+    new = _nested(pi, "payment_details", "order_reference")
+    # Only accept it if it looks like an invoice ID — Stripe could
+    # populate `order_reference` with other types of references in
+    # the future (quotes, etc.), and we don't want to mis-tag those.
+    if isinstance(new, str) and new.startswith("in_"):
+        return new
+    return _id_of(getattr(pi, "invoice", None))
+
+
 def _flatten_payment_intent(pi) -> dict:
     """Flatten a Stripe PaymentIntent object.
 
@@ -525,7 +554,7 @@ def _flatten_payment_intent(pi) -> dict:
     return {
         "id": pi.id,
         "customer_id": _id_of(getattr(pi, "customer", None)),
-        "invoice_id": _id_of(getattr(pi, "invoice", None)),
+        "invoice_id": _payment_intent_invoice_id(pi),
         "amount": getattr(pi, "amount", None),
         "amount_received": getattr(pi, "amount_received", None),
         "amount_capturable": getattr(pi, "amount_capturable", None),
@@ -554,6 +583,11 @@ def _flatten_charge(c) -> dict:
       - For older accounts / certain flows, Charges has rows that
         don't appear in PaymentIntents.
 
+    No `invoice_id` column: modern Stripe API removed `charge.invoice`
+    entirely. To go from a charge to its invoice, join via
+    `charges.payment_intent_id == payment_intents.id` and read
+    `payment_intents.invoice_id`.
+
     Includes `payment_intent_id` so the two CSVs join 1:1 where both
     are present.
     """
@@ -563,7 +597,6 @@ def _flatten_charge(c) -> dict:
     return {
         "id": c.id,
         "customer_id": _id_of(getattr(c, "customer", None)),
-        "invoice_id": _id_of(getattr(c, "invoice", None)),
         "payment_intent_id": _id_of(getattr(c, "payment_intent", None)),
         "amount": getattr(c, "amount", None),
         "amount_captured": getattr(c, "amount_captured", None),
@@ -607,6 +640,30 @@ def _flatten_refund(r) -> dict:
     }
 
 
+def _dispute_network_reason_code(d) -> str | None:
+    """`dispute.network_reason_code` was moved into
+    `dispute.payment_method_details.<type>.<reason_field>` on newer API
+    versions, where `<type>` is the payment method ("card", "paypal",
+    etc.) and `<reason_field>` varies: card disputes carry
+    `network_reason_code`, PayPal disputes carry `reason_code`. The
+    column name stays `network_reason_code` for CSV-schema continuity
+    even though it holds the PayPal value for PayPal disputes — close
+    semantic equivalent.
+
+    Falls back to the legacy top-level field for older API versions.
+    """
+    pmd = getattr(d, "payment_method_details", None)
+    if pmd is not None:
+        pmd_type = (pmd.get("type") if isinstance(pmd, dict)
+                    else getattr(pmd, "type", None))
+        if pmd_type:
+            for field in ("network_reason_code", "reason_code"):
+                val = _nested(pmd, pmd_type, field)
+                if val:
+                    return val
+    return getattr(d, "network_reason_code", None)
+
+
 def _flatten_dispute(d) -> dict:
     ev = getattr(d, "evidence_details", None) or {}
     evidence_due_by = (ev.get("due_by") if isinstance(ev, dict)
@@ -622,7 +679,7 @@ def _flatten_dispute(d) -> dict:
         "created": _ts_to_iso(d.created),
         "evidence_due_by": _ts_to_iso(evidence_due_by),
         "is_charge_refundable": getattr(d, "is_charge_refundable", None),
-        "network_reason_code": getattr(d, "network_reason_code", None),
+        "network_reason_code": _dispute_network_reason_code(d),
         "balance_transaction": getattr(d, "balance_transaction", None),
     }
 
@@ -644,8 +701,20 @@ def _flatten_coupon(c) -> dict:
     }
 
 
+def _promotion_code_coupon_id(pc) -> str | None:
+    """`promotion_code.coupon` was moved to `promotion_code.promotion.coupon`
+    on newer API versions — Stripe wraps the linked resource in a small
+    discriminated dict (`promotion.type == "coupon"`, `promotion.coupon
+    == "<coupon_id>"`). Falls back to the legacy top-level field for
+    older accounts."""
+    new = _nested(pc, "promotion", "coupon")
+    if new:
+        return _id_of(new)
+    return _id_of(getattr(pc, "coupon", None))
+
+
 def _flatten_promotion_code(pc) -> dict:
-    coupon_id = _id_of(getattr(pc, "coupon", None))
+    coupon_id = _promotion_code_coupon_id(pc)
     restrictions = getattr(pc, "restrictions", None) or {}
     return {
         "id": pc.id,
