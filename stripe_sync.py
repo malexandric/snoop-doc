@@ -24,7 +24,8 @@ Core (high-volume, incremental sync):
 - `stripe_subscription_items.csv`   — one row per (sub, price) pair
 - `stripe_invoices.csv`             — one row per invoice
 - `stripe_invoice_line_items.csv`   — one row per invoice line
-- `stripe_charges.csv`              — one row per charge (cash movement)
+- `stripe_payment_intents.csv`      — one row per payment intent (modern Stripe payment object)
+- `stripe_charges.csv`              — one row per charge (legacy payment object; we keep this alongside payment_intents for direct comparison — charges has fields PI doesn't, like `amount_refunded` rolled up)
 - `stripe_refunds.csv`              — one row per refund
 - `stripe_disputes.csv`             — one row per dispute / chargeback
 - `stripe_payouts.csv`              — one row per payout to bank
@@ -98,10 +99,11 @@ SYNC_ORDER = (
     "subscription_items",   # side effect of subscriptions sync
     "invoices",
     "invoice_line_items",   # side effect of invoices sync
+    "payment_intents",
     "charges",
     "refunds",
     "disputes",
-    # Bank-facing — pulled last because it's tied to charges/refunds upstream.
+    # Bank-facing — pulled last because it's tied to payments/refunds upstream.
     "payouts",
 )
 
@@ -210,10 +212,17 @@ def filename_for(object_key: str) -> str:
 
 def is_stripe_synced_file(filename: str) -> str | None:
     """Return the object key (e.g. `"customers"`) if `filename` matches a
-    registered Stripe sync; else None. Used by the Data view's per-row UI."""
+    registered Stripe sync; else None. Used by the Data view's per-row UI.
+
+    Skips registry entries whose key is no longer in `SPECS` — those are
+    stale leftovers from a previous schema version (e.g. `charges` after
+    we swapped to `payment_intents`). Returning None for them means the
+    file will render as a regular non-synced CSV, and the user can
+    delete it via the normal Delete button without the UI crashing on
+    lookup."""
     reg = load_registry()
     for key in reg.get("objects", {}):
-        if filename_for(key) == filename:
+        if filename_for(key) == filename and key in SPECS:
             return key
     return None
 
@@ -228,6 +237,26 @@ def _ts_to_iso(ts: int | None) -> str | None:
     if ts is None or ts == 0:
         return None
     return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def _id_of(ref) -> str | None:
+    """Normalise a Stripe reference field to a string id (or None).
+
+    A reference like `pi.invoice` or `c.customer` can take three shapes
+    in a Stripe SDK response:
+      - a string id ("in_abc123")
+      - a nested StripeObject (when expanded)
+      - missing entirely (the attribute isn't on the object at all)
+
+    Use this anywhere a flattener pulls a reference id out of a parent
+    object. Pair with `getattr(parent, "field", None)` so the
+    "missing entirely" case doesn't raise AttributeError.
+    """
+    if ref is None:
+        return None
+    if isinstance(ref, str):
+        return ref
+    return getattr(ref, "id", None)
 
 
 def _flatten_customer(c) -> dict:
@@ -319,21 +348,89 @@ def _flatten_invoice(inv) -> dict:
     }
 
 
+def _flatten_payment_intent(pi) -> dict:
+    """Flatten a Stripe PaymentIntent object.
+
+    PaymentIntents replaced Charges as the canonical payment object on
+    modern Stripe accounts. They carry the same money-movement info
+    plus the payment lifecycle state (requires_payment_method,
+    requires_confirmation, processing, succeeded, canceled, etc.).
+
+    Lost vs the old Charge flattener: `amount_refunded` and `refunded`
+    (PaymentIntents don't carry refund totals directly — derive via
+    `stripe_refunds.csv` joined on `payment_intent_id`) and `disputed`
+    (derive via `stripe_disputes.csv` joined on `payment_intent_id`).
+
+    Every optional attribute uses `getattr` with a default — the Stripe
+    SDK doesn't reliably populate fields like `invoice` or `customer`
+    on PaymentIntents that aren't tied to one (one-off payments, direct
+    PaymentIntent creation, guest checkouts). Direct attribute access
+    raises AttributeError in those cases.
+    """
+    # last_payment_error is nested; pull out code + message
+    err = getattr(pi, "last_payment_error", None) or {}
+    if isinstance(err, dict):
+        err_code = err.get("code")
+        err_message = err.get("message")
+    else:
+        err_code = getattr(err, "code", None)
+        err_message = getattr(err, "message", None)
+
+    # payment_method_types is a list of strings (e.g. ["card", "us_bank_account"]);
+    # for analysis the first entry is usually enough.
+    pm_types = getattr(pi, "payment_method_types", None) or []
+    pm_type = pm_types[0] if pm_types else None
+
+    return {
+        "id": pi.id,
+        "customer_id": _id_of(getattr(pi, "customer", None)),
+        "invoice_id": _id_of(getattr(pi, "invoice", None)),
+        "amount": getattr(pi, "amount", None),
+        "amount_received": getattr(pi, "amount_received", None),
+        "amount_capturable": getattr(pi, "amount_capturable", None),
+        "status": getattr(pi, "status", None),
+        "created": _ts_to_iso(getattr(pi, "created", None)),
+        "canceled_at": _ts_to_iso(getattr(pi, "canceled_at", None)),
+        "cancellation_reason": getattr(pi, "cancellation_reason", None),
+        "last_payment_error_code": err_code,
+        "last_payment_error_message": err_message,
+        "payment_method_type": pm_type,
+        "payment_method_id": _id_of(getattr(pi, "payment_method", None)),
+        "currency": getattr(pi, "currency", None),
+        "description": getattr(pi, "description", None),
+    }
+
+
 def _flatten_charge(c) -> dict:
+    """Flatten a Stripe Charge object.
+
+    Charge is Stripe's legacy payment object. We keep it alongside
+    PaymentIntents (which is what modern accounts use) because:
+      - Charges has rolled-up convenience fields PI doesn't expose:
+        `amount_refunded` (sum across refunds), `refunded` (bool),
+        `disputed` (bool), `paid` (bool), `failure_code` / `_message`.
+      - Direct comparison helps verify the two sources agree.
+      - For older accounts / certain flows, Charges has rows that
+        don't appear in PaymentIntents.
+
+    Includes `payment_intent_id` so the two CSVs join 1:1 where both
+    are present.
+    """
     pm_details = getattr(c, "payment_method_details", None) or {}
     pm_type = (pm_details.get("type") if isinstance(pm_details, dict)
                else getattr(pm_details, "type", None))
     return {
         "id": c.id,
-        "customer_id": c.customer if isinstance(c.customer, str) else (c.customer.id if c.customer else None),
-        "invoice_id": c.invoice if isinstance(c.invoice, str) else (c.invoice.id if c.invoice else None),
-        "amount": c.amount,
+        "customer_id": _id_of(getattr(c, "customer", None)),
+        "invoice_id": _id_of(getattr(c, "invoice", None)),
+        "payment_intent_id": _id_of(getattr(c, "payment_intent", None)),
+        "amount": getattr(c, "amount", None),
         "amount_captured": getattr(c, "amount_captured", None),
         "amount_refunded": getattr(c, "amount_refunded", None),
-        "status": c.status,
+        "status": getattr(c, "status", None),
         "paid": getattr(c, "paid", None),
         "refunded": getattr(c, "refunded", None),
-        "created": _ts_to_iso(c.created),
+        "created": _ts_to_iso(getattr(c, "created", None)),
         "failure_code": getattr(c, "failure_code", None),
         "failure_message": getattr(c, "failure_message", None),
         "payment_method_type": pm_type,
@@ -519,6 +616,7 @@ SPECS: dict[str, ObjectSpec] = {
     # Line items inherit incremental from invoices (each invoice line's
     # `id` is stable, so append-with-dedupe gives us correct merging).
     "invoice_line_items": ObjectSpec("invoice_line_items", full_repull=False, label="Invoice line items"),
+    "payment_intents":    ObjectSpec("payment_intents",    full_repull=False, label="Payment intents"),
     "charges":            ObjectSpec("charges",            full_repull=False, label="Charges"),
     "refunds":            ObjectSpec("refunds",            full_repull=False, label="Refunds"),
     "disputes":           ObjectSpec("disputes",           full_repull=False, label="Disputes"),
@@ -623,6 +721,12 @@ def _fetch_object(
         # `sync_object("invoice_line_items", ...)` call doesn't refetch
         # invoices (would be 5+ minutes of wasted API work).
         return [], []
+
+    elif key == "payment_intents":
+        for i, pi in enumerate(_list_with_created_filter(stripe.PaymentIntent, since_ts)):
+            rows.append(_flatten_payment_intent(pi))
+            if on_progress and (i + 1) % 500 == 0:
+                on_progress(i + 1)
 
     elif key == "charges":
         for i, c in enumerate(_list_with_created_filter(stripe.Charge, since_ts)):

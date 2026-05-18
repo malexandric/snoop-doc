@@ -14,7 +14,7 @@ Built for an internal finance + marketing + leadership team.
 - **Saved Questions** — pin frequently-asked questions and replay them with one click.
 - **Agent memory** — Snoop can save durable facts the user teaches it ("fiscal year is July–June", "PR retainer isn't part of marketing spend") to a memory file that auto-loads into every future conversation. Saves are visible in the chat and editable via the Context view.
 - **Web search + fetch** — optional. Web fetch is always available so Snoop can pull any URL you mention. Web search is a toggle (off by default — costs extra per request) for when you need external info: exchange rates, industry benchmarks, news.
-- **Saved Items** — save any chart, table, or full exchange Claude produced. Tables can be promoted into `data/tables/` to feed the next analysis. **Save-as-report** packages a question + the assistant's response (text, charts, tables) as a self-contained HTML file you can email, archive, or open offline.
+- **Saved Items** — save any chart, table, full exchange, or whole conversation Claude produced. Tables can be promoted into `data/tables/` to feed the next analysis. **Save-as-report** packages a question + the assistant's response (text, charts, tables) as a self-contained HTML file you can email, archive, or open offline. **Save chat** stores the entire thread (every question + response + chart + table) so you can pick a saved conversation later and **Resume** it — loads back into the chat and you keep going.
 - **Charts demo** — a gallery of every chart type Snoop can produce, with "when to use" notes against fake P&L data.
 - **AI context editor** — modal chat that drafts a precise context doc for a CSV (or a general doc). Sees a full data fingerprint, can run pandas to verify claims, and stays consistent with the rest of your project's context.
 - **Scope picker** — narrow the conversation to a subset of CSVs to keep the system prompt lean and the agent focused.
@@ -134,7 +134,8 @@ Snoop can pull your Stripe data into twelve CSVs in `data/tables/`:
 | `stripe_subscription_items.csv` | one row per (sub, price) — covers multi-product subs |
 | `stripe_invoices.csv` | one row per invoice |
 | `stripe_invoice_line_items.csv` | one row per invoice line — proration / multi-product attribution |
-| `stripe_charges.csv` | one row per charge (cash movement) |
+| `stripe_payment_intents.csv` | one row per payment intent (Stripe's modern payment object) |
+| `stripe_charges.csv` | one row per charge (legacy payment object — kept alongside Payment Intents for direct comparison; carries roll-up fields PI doesn't, like `amount_refunded`, `refunded`, `disputed`) |
 | `stripe_refunds.csv` | one row per refund |
 | `stripe_disputes.csv` | one row per dispute / chargeback |
 | `stripe_payouts.csv` | one row per payout to your bank |
@@ -152,7 +153,7 @@ The agent joins these in pandas at query time. Typical questions answerable from
 ### One-time setup (per Snoop install)
 
 1. In Stripe Dashboard → **Developers → API keys → Create restricted key**.
-2. Give it a name (e.g. "Snoop Doc – read-only"). Set the following **resource permissions to Read**: Customers, Subscriptions, Invoices, Charges, Refunds, Disputes, Payouts, Products, Prices, Coupons, Promotion Codes. Leave everything else **None**.
+2. Give it a name (e.g. "Snoop Doc – read-only"). Set the following **resource permissions to Read**: Customers, Subscriptions, Invoices, Payment Intents, Charges, Refunds, Disputes, Payouts, Products, Prices, Coupons, Promotion Codes. Leave everything else **None**.
 3. Click Create, copy the `rk_live_…` (or `rk_test_…`) key.
 4. In Snoop: **Settings → Integrations → Stripe** → paste the key → **Test connection** → **Save settings**.
 

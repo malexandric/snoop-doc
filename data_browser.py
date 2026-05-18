@@ -562,7 +562,9 @@ def _render_tables() -> None:
     gs_registry = gsheets.load_registry()
     stripe_objects = stripe_sync.load_registry().get("objects", {})
     stripe_synced_keys = [
-        k for k in stripe_objects if k not in stripe_sync.SIDE_EFFECT_OBJECTS
+        k for k in stripe_objects
+        if k not in stripe_sync.SIDE_EFFECT_OBJECTS
+        and k in stripe_sync.SPECS  # skip stale entries from old schemas
     ]
     has_anything_to_sync = bool(gs_registry) or bool(stripe_synced_keys)
 

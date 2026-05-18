@@ -1065,11 +1065,11 @@ with st.sidebar:
                 st.session_state.tables = {}
                 reset_usage()
 
-            # Clear chat + Stop pick up the same link-style treatment as
-            # the other nav items (Ask the Snoop is the only real button
-            # — these are companion actions, not the primary CTA).
-            # Tertiary type gives Streamlit's native link button look;
-            # the container-key wrap is a redundant CSS hook.
+            # Clear chat + Save chat + Stop pick up the same link-style
+            # treatment as the other nav items (Ask the Snoop is the only
+            # real button — these are companion actions, not the primary
+            # CTA). Tertiary type gives Streamlit's native link button
+            # look; the container-key wrap is a redundant CSS hook.
             with st.container(key="snoop_navlink_clear_chat"):
                 if st.button(
                     "Clear chat",
@@ -1083,6 +1083,29 @@ with st.sidebar:
                         "Yes, clear",
                         _do_clear_chat,
                     )
+
+            # Save chat — only meaningful when there's a chat to save AND
+            # we're on the chat view (otherwise the user isn't looking at
+            # what they're about to save). Opens the save dialog in
+            # saved_items, which reads session_state directly.
+            if (
+                st.session_state.view == VIEW_CHAT
+                and st.session_state.messages
+            ):
+                with st.container(key="snoop_navlink_save_chat"):
+                    if st.button(
+                        "Save chat",
+                        icon=":material/bookmark_add:",
+                        key="save_chat",
+                        use_container_width=True,
+                        type="tertiary",
+                        help=(
+                            "Save the whole conversation — every question, "
+                            "response, chart, and table — so you can come "
+                            "back to it later from Saved Items › Conversations."
+                        ),
+                    ):
+                        saved_items.show_save_conversation_dialog()
 
             # Stop button — sets a flag the agent loop checks between
             # iterations. Clicking also triggers a Streamlit rerun,
@@ -1467,13 +1490,19 @@ def _current_table_scope() -> list[str] | None:
     `_scope_chk_<name>`. A missing key means "checked" (we default to all
     tables included). Returning None lets `tools` skip the filter entirely
     in the common case (everything selected).
+
+    Empty selection (every box unchecked) is also treated as "all" — there
+    isn't a useful interpretation of "exclude everything" in a chat that's
+    about answering questions, and the picker label already reads "Working
+    with all N data files" in that state. A user who's unchecked everything
+    most likely meant to reset and select a fresh subset.
     """
     available = list(tools.discover_tables().keys())
     if not available:
         return None
     selected = [n for n in available if st.session_state.get(_scope_key(n), True)]
-    if len(selected) == len(available):
-        return None  # everything = no filter
+    if not selected or len(selected) == len(available):
+        return None  # nothing or everything = no filter
     return selected
 
 
