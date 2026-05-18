@@ -918,6 +918,47 @@ def sync_all(
     return results
 
 
+def reset_incremental_cursors() -> int:
+    """Null out `last_synced_at` for every object type whose sync uses an
+    incremental `created[gte]` filter (i.e. anything with `full_repull=False`
+    in `SPECS`). Returns the number of cursors reset.
+
+    Use this when the registry's timestamps reflect a different upstream
+    than the current API key — e.g. switching from a test Stripe account
+    to a live one. Without a reset, the next incremental sync filters by
+    a date from the previous account's history and misses everything
+    older than that timestamp on the new account.
+
+    Full-repull objects (subscriptions, products, prices, coupons,
+    promotion_codes, subscription_items, invoice_line_items) aren't
+    affected — they re-fetch everything on every sync anyway.
+    """
+    reg = load_registry()
+    incremental_keys = {k for k, spec in SPECS.items() if not spec.full_repull}
+    count = 0
+    for key, status in reg.get("objects", {}).items():
+        if key not in incremental_keys:
+            continue
+        if status.get("last_synced_at") is not None:
+            status["last_synced_at"] = None
+            status["row_count"] = 0
+            count += 1
+    save_registry(reg)
+    return count
+
+
+def sync_all_full(
+    api_key: str,
+    on_progress: Callable[[str, int], None] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Reset every incremental cursor and then run `sync_all`. Forces a
+    full re-pull of every object from Stripe — slow on large accounts,
+    but the only way to pick up historical data after an API key swap
+    (or any time the local cursors are stale relative to upstream)."""
+    reset_incremental_cursors()
+    return sync_all(api_key, on_progress=on_progress)
+
+
 def _humanize_stripe_error(e: Exception) -> str:
     """Translate a Stripe SDK exception into a one-line user-friendly
     message. Keeps `AuthenticationError` distinct so the UI can prompt

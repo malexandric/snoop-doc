@@ -23,6 +23,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 import chart_demo
+import context_pointers
 
 
 TABLES_DIR = Path(__file__).parent / "data" / "tables"
@@ -139,11 +140,21 @@ def _format_table_summary(selected: list[str] | None = None) -> str:
         )
 
     discovered = discover_tables()
+    pointer_map = context_pointers.build_pointer_map()
     lines = ["Available DataFrames loaded from `data/tables/`:", ""]
     for name, df in tables.items():
         source = discovered.get(name)
         source_str = f" (from `{source.name}`)" if source else ""
         lines.append(f"**`{name}`**{source_str} — {len(df):,} rows × {len(df.columns)} columns")
+        # If this CSV has been pointed at one or more general context docs
+        # via the Data view, surface that pointer next to the table.
+        # That doc is loaded into the system prompt (general docs always
+        # are) and is where the schema + business meaning live, so the
+        # model knows where to look without guessing from filenames.
+        if source is not None:
+            pointer_docs = pointer_map.get(source.name, [])
+            if pointer_docs:
+                lines.append(f"  schema: {', '.join(pointer_docs)}")
         # First 5 rows as a preview so Claude can spot multi-row headers, currency
         # strings, etc. Truncate wide tables so we don't blow the token budget.
         try:

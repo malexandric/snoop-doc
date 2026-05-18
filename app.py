@@ -20,6 +20,7 @@ import streamlit.components.v1 as components
 
 import chart_demo
 import context_browser
+import context_pointers
 import data_browser
 import dialogs
 import gsheets
@@ -193,9 +194,14 @@ def _load_context_docs(table_scope: list[str] | None) -> str:
         )
         for path in general_files:
             try:
-                parts.append(f"### From `{path.name}`\n\n{path.read_text(encoding='utf-8')}")
+                raw = path.read_text(encoding="utf-8")
             except OSError:
                 continue
+            # Strip the YAML frontmatter (schema-pointer metadata for the
+            # Data view). The body is what the agent reads — exposing raw
+            # `covers: [...]` lines would just be noise it has to ignore.
+            body = context_pointers.strip_frontmatter(raw)
+            parts.append(f"### From `{path.name}`\n\n{body}")
 
     # Doc-related: filter by the current table scope. The scope uses
     # sanitized variable names (e.g. `pnl_2026`); the doc file's stem

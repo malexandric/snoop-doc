@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 import context_chat
+import context_pointers
 import gsheets
 import stripe_sync
 import theme
@@ -38,6 +39,11 @@ def render() -> None:
     # opens / keeps-open the dialog whenever the relevant session_state is
     # set (either from clicking a Context button or after a fresh upload).
     context_chat.maybe_render()
+    # The context-management dialog (set a schema-doc pointer, edit the
+    # individual context doc, etc.) is owned by this module. Same pattern
+    # as `context_chat.maybe_render`: opens whenever a session_state flag
+    # is set, persists across reruns inside the dialog.
+    _maybe_render_context_dialog()
 
     st.subheader("Data")
     st.caption(
@@ -128,6 +134,21 @@ def _render_gsheets_sync_caption(entry: gsheets.SyncEntry) -> None:
         st.caption(f"{_STALENESS_ICON[band]} from {target} · synced {label}{suffix}")
 
 
+def _render_context_status_caption(pointer_docs: list[str], has_individual: bool) -> None:
+    """A small one-line summary of the file's context state. Renders
+    nothing when neither a pointer nor an individual doc exists — the
+    Context button's bare-page icon already signals "set this up".
+    """
+    if not pointer_docs and not has_individual:
+        return
+    parts: list[str] = []
+    if pointer_docs:
+        parts.append(f"schema: `{', '.join(pointer_docs)}`")
+    if has_individual:
+        parts.append("individual context")
+    st.caption(":material/description: " + " · ".join(parts))
+
+
 def _render_stripe_sync_caption(object_key: str) -> None:
     label = stripe_sync.staleness_label(object_key)
     band = stripe_sync.staleness_band(object_key)
@@ -208,12 +229,18 @@ def _render_file_list_with_actions(
     # Pre-load both sync registries once per render so we don't re-read
     # the JSON for every row.
     gs_by_filename = {e.target_filename: e for e in gsheets.load_registry()}
+    # Schema-doc pointer map: which general context doc(s) cover each
+    # CSV. Built once per render and consulted in the loop below to
+    # render a small caption beneath the filename.
+    pointer_map = context_pointers.build_pointer_map() if show_context_action else {}
 
     for f in files:
         is_active = current == f.name
         gs_entry = gs_by_filename.get(f.name)
         stripe_key = stripe_sync.is_stripe_synced_file(f.name)
         is_synced = gs_entry is not None or stripe_key is not None
+        has_individual_ctx = _context_path_for_csv(f.name).exists() if show_context_action else False
+        pointer_docs = pointer_map.get(f.name, [])
 
         with st.container(border=True):
             if show_context_action:
@@ -235,6 +262,8 @@ def _render_file_list_with_actions(
                     _render_gsheets_sync_caption(gs_entry)
                 elif stripe_key is not None:
                     _render_stripe_sync_caption(stripe_key)
+                if show_context_action:
+                    _render_context_status_caption(pointer_docs, has_individual_ctx)
 
             if sync_col is not None:
                 with sync_col:
@@ -280,15 +309,15 @@ def _render_file_list_with_actions(
 
             if ctx_col is not None:
                 with ctx_col:
-                    ctx_exists = _context_path_for_csv(f.name).exists()
+                    has_any_context = bool(pointer_docs) or has_individual_ctx
                     if st.button(
                         "",
-                        icon=":material/description:" if ctx_exists else ":material/note_add:",
+                        icon=":material/description:" if has_any_context else ":material/note_add:",
                         help="Edit context",
                         key=f"{key_prefix}_ctx_{f.name}",
                         use_container_width=True,
                     ):
-                        context_chat.open_for_existing(f.name)
+                        st.session_state["_context_dialog_csv"] = f.name
                         st.rerun()
 
             with del_col:
@@ -899,16 +928,44 @@ def _render_stripe_sync_section() -> None:
             icon=":material/schedule:",
         )
 
-    # Sync-all button at the top.
-    if st.button(
-        "Sync all Stripe objects",
-        icon=":material/sync:",
-        key="_stripe_sync_all",
-        type="primary",
-        use_container_width=False,
-    ):
-        _do_stripe_sync_all()
-        st.rerun()
+    # Sync-all button at the top + a "Force full re-sync" companion that
+    # nulls out the incremental cursors first. Use the second when the
+    # registry's timestamps no longer reflect what's upstream — e.g.
+    # right after swapping the API key to a different Stripe account.
+    sync_col, force_col, _spacer = st.columns([2, 2, 5])
+    with sync_col:
+        if st.button(
+            "Sync all Stripe objects",
+            icon=":material/sync:",
+            key="_stripe_sync_all",
+            type="primary",
+            use_container_width=True,
+        ):
+            _do_stripe_sync_all()
+            st.rerun()
+    with force_col:
+        if st.button(
+            "Force full re-sync",
+            icon=":material/restart_alt:",
+            key="_stripe_force_full",
+            use_container_width=True,
+            help=(
+                "Clears the 'last synced at' timestamps for every "
+                "incremental object (customers, invoices, payment "
+                "intents, charges, refunds, disputes, payouts) and "
+                "then re-syncs everything from the start. Use this "
+                "when historical data appears to be missing — for "
+                "example, after switching the API key to a different "
+                "Stripe account. Slower than a regular sync."
+            ),
+        ):
+            confirm_or_run(
+                "Force a full re-sync of every Stripe object from "
+                "the beginning? This will pull all historical data "
+                "again — slow on large accounts.",
+                "Yes, force full re-sync",
+                _do_stripe_sync_all_full,
+            )
 
     st.markdown("---")
 
@@ -962,12 +1019,24 @@ def _render_stripe_sync_section() -> None:
 
 
 def _do_stripe_sync_all() -> None:
-    """Run sync_all with a live-updating status panel."""
+    """Run sync_all (incremental) with a live-updating status panel."""
+    _do_stripe_sync_all_impl(full=False)
+
+
+def _do_stripe_sync_all_full() -> None:
+    """Reset every incremental cursor and re-pull every object from
+    scratch. Use after swapping API keys or whenever the local
+    timestamps are stale vs upstream."""
+    _do_stripe_sync_all_impl(full=True)
+
+
+def _do_stripe_sync_all_impl(full: bool) -> None:
     api_key = st.session_state.get("stripe_api_key", "")
     if not api_key:
         st.toast("Set a Stripe API key in Settings first.", icon=":material/key:")
         return
-    status = st.status("Syncing all Stripe objects…", expanded=True)
+    label = "Force-syncing all Stripe objects from scratch…" if full else "Syncing all Stripe objects…"
+    status = st.status(label, expanded=True)
     state_holder = {"current": ""}
 
     def cb(object_key: str, n: int) -> None:
@@ -977,7 +1046,11 @@ def _do_stripe_sync_all() -> None:
             status.write(f"**{pretty}**")
         status.update(label=f"Syncing Stripe {pretty}… {n:,} fetched")
 
-    results = stripe_sync.sync_all(api_key, on_progress=cb)
+    if full:
+        status.write("Clearing incremental cursors…")
+        results = stripe_sync.sync_all_full(api_key, on_progress=cb)
+    else:
+        results = stripe_sync.sync_all(api_key, on_progress=cb)
 
     fail = [(k, r) for k, r in results if not r.get("ok")]
     succ = [(k, r) for k, r in results if r.get("ok")]
@@ -1001,6 +1074,173 @@ def _do_stripe_sync_all() -> None:
             state="complete",
             expanded=False,
         )
+
+
+def _maybe_render_context_dialog() -> None:
+    """Open the context-management dialog if a CSV has been queued for it.
+
+    Single-flag pattern (`_context_dialog_csv` in session_state): the
+    Context button sets the filename + reruns; the dialog reads it back.
+    Cleared inside the dialog's Save/Cancel/launch-AI handlers so it
+    doesn't reopen on the next rerun.
+    """
+    csv_name = st.session_state.get("_context_dialog_csv")
+    if not csv_name:
+        return
+    # If the file no longer exists (deleted while dialog was queued),
+    # silently drop the flag — opening a dialog about a missing file
+    # would confuse the user more than the missing dialog will.
+    if not (TABLES_DIR / csv_name).exists():
+        st.session_state.pop("_context_dialog_csv", None)
+        return
+    _show_context_dialog(csv_name)
+
+
+@st.dialog("Context", width="medium")
+def _show_context_dialog(csv_name: str) -> None:
+    """Dialog for managing a single CSV's context.
+
+    Two independent sections:
+      1. **Schema doc pointer** — pick one of the general context docs
+         to claim coverage of this CSV (or `None` to clear). Writes
+         into the chosen doc's `covers:` frontmatter list via
+         `context_pointers.set_pointer`.
+      2. **Individual context doc** — open the AI editor (existing
+         flow) for `data/context/tables/<csv_stem>.md`, or just delete
+         the existing doc.
+
+    Each section commits independently so the user can set a pointer
+    without touching the individual doc, or vice versa.
+    """
+    st.markdown(f"**`{csv_name}`**")
+    st.caption(
+        "Choose where this file's schema and business meaning are "
+        "documented. The agent reads the schema doc to learn the file's "
+        "columns and conventions, so it doesn't have to guess from the "
+        "raw column names."
+    )
+
+    # --- Section 1: schema-doc pointer --------------------------------
+    st.markdown("### Schema doc")
+    general_docs = context_pointers.general_doc_names()
+    current_pointers = context_pointers.docs_for_csv(csv_name)
+    # The UI enforces one pointer per CSV. If somebody hand-edited the
+    # docs to point this CSV at two group docs, surface that as the
+    # current selection by preferring the first one and warning.
+    current_choice = current_pointers[0] if current_pointers else None
+    if len(current_pointers) > 1:
+        st.warning(
+            f"This file is currently listed in multiple group docs: "
+            f"{', '.join(current_pointers)}. Saving below will move it to "
+            "a single doc.",
+            icon=":material/warning:",
+        )
+
+    if not general_docs:
+        st.info(
+            "No general context docs exist yet. Create one from the "
+            "**Context** view first, then come back to point this file at it.",
+            icon=":material/lightbulb:",
+        )
+    else:
+        options = ["(none)"] + general_docs
+        try:
+            default_idx = options.index(current_choice) if current_choice else 0
+        except ValueError:
+            default_idx = 0
+        picked = st.selectbox(
+            "This file's schema is documented in:",
+            options=options,
+            index=default_idx,
+            key=f"_ctx_dialog_pointer_{csv_name}",
+            help=(
+                "Pick the general context doc that explains this file's "
+                "columns and meaning. The agent reads it on every "
+                "conversation, so a single doc can cover many CSVs at "
+                "once (e.g. one `pnl.md` describing every year of P&L)."
+            ),
+        )
+        if st.button(
+            "Save schema pointer",
+            type="primary",
+            icon=":material/save:",
+            key=f"_ctx_dialog_save_pointer_{csv_name}",
+            use_container_width=True,
+        ):
+            chosen = None if picked == "(none)" else picked
+            try:
+                context_pointers.set_pointer(csv_name, chosen)
+                if chosen:
+                    st.toast(f"Pointed `{csv_name}` at `{chosen}`.", icon=":material/done:")
+                else:
+                    st.toast(f"Cleared schema pointer for `{csv_name}`.", icon=":material/done:")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Could not update pointer: {e}")
+                return
+            st.session_state.pop("_context_dialog_csv", None)
+            st.rerun()
+
+    st.markdown("---")
+
+    # --- Section 2: individual context doc ----------------------------
+    st.markdown("### Individual context")
+    indiv_path = _context_path_for_csv(csv_name)
+    indiv_exists = indiv_path.exists()
+    if indiv_exists:
+        st.caption(
+            f"`{_rel(indiv_path)}` — a doc specific to this file. "
+            "Use this for quirks that don't belong in the shared schema doc."
+        )
+    else:
+        st.caption(
+            "No individual doc yet. Most files don't need one — the "
+            "schema doc above usually covers everything. Add one only "
+            "for file-specific quirks (a one-off rebrand, a known bad "
+            "row range, etc.)."
+        )
+
+    indiv_col1, indiv_col2 = st.columns(2)
+    with indiv_col1:
+        ai_label = "Edit individual doc with AI" if indiv_exists else "Create individual doc with AI"
+        if st.button(
+            ai_label,
+            icon=":material/auto_awesome:",
+            key=f"_ctx_dialog_edit_indiv_{csv_name}",
+            use_container_width=True,
+        ):
+            st.session_state.pop("_context_dialog_csv", None)
+            context_chat.open_for_existing(csv_name)
+            st.rerun()
+    with indiv_col2:
+        if indiv_exists:
+            if st.button(
+                "Delete individual doc",
+                icon=":material/delete:",
+                key=f"_ctx_dialog_del_indiv_{csv_name}",
+                use_container_width=True,
+            ):
+                def _do_delete(p=indiv_path):
+                    try:
+                        p.unlink()
+                        st.toast(f"Deleted `{p.name}`.", icon=":material/done:")
+                    except OSError as e:
+                        st.error(f"Could not delete: {e}")
+
+                confirm_or_run(
+                    f"Delete `{indiv_path.name}`? The schema pointer above is "
+                    "unaffected.",
+                    "Yes, delete",
+                    _do_delete,
+                )
+
+    st.markdown("---")
+    if st.button(
+        "Close",
+        key=f"_ctx_dialog_close_{csv_name}",
+        use_container_width=True,
+    ):
+        st.session_state.pop("_context_dialog_csv", None)
+        st.rerun()
 
 
 def _do_gs_import(
