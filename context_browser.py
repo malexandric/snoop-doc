@@ -12,13 +12,16 @@ This module renders:
   - The folder README (collapsible).
   - A "Create new general doc" flow that asks for a filename, then opens
     the AI context-chat to draft it.
-  - The list of existing general docs with View / Edit (AI) / Delete
-    actions. View shows the markdown; Edit launches the AI context-chat.
+  - An "Upload a file" flow for dropping in a ready-made .md doc.
+  - The list of existing general docs with View / Edit (AI) / Download /
+    Delete actions, plus an "Export all" ZIP button above the list.
 
 Doc-related docs are intentionally NOT listed here — they're accessed
 via the per-CSV Context button in the Data view.
 """
 
+import io
+import zipfile
 from pathlib import Path
 
 import streamlit as st
@@ -51,6 +54,7 @@ def render() -> None:
 
     _render_folder_readme()
     _render_new_doc()
+    _render_upload_doc()
 
     files = _list_general_docs()
     if not files:
@@ -60,7 +64,22 @@ def render() -> None:
         )
         return
 
-    st.markdown(f"**{len(files)} doc{'s' if len(files) != 1 else ''}**")
+    # Toolbar row: doc count on the left, Export all on the right.
+    count_col, export_col = st.columns([6, 2])
+    with count_col:
+        st.markdown(f"**{len(files)} doc{'s' if len(files) != 1 else ''}**")
+    with export_col:
+        st.download_button(
+            "Export all",
+            data=_build_zip(files),
+            file_name="context_docs.zip",
+            mime="application/zip",
+            icon=":material/download:",
+            key="ctx_export_all",
+            use_container_width=True,
+            help="Download all general context docs as a ZIP archive.",
+        )
+
     chosen_name = _render_file_list(files)
 
     if not chosen_name:
@@ -91,6 +110,14 @@ def _list_general_docs() -> list[Path]:
         and p.suffix.lower() == ".md"
         and p.name.lower() != "readme.md"
     )
+
+
+def _build_zip(files: list[Path]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(f, f.name)
+    return buf.getvalue()
 
 
 def _render_folder_readme() -> None:
@@ -146,10 +173,54 @@ def _render_new_doc() -> None:
             st.rerun()
 
 
+def _render_upload_doc() -> None:
+    """Upload a ready-made .md file directly, without AI involvement."""
+    with st.expander("Upload a context doc", icon=":material/upload_file:"):
+        st.caption("Drop in a Markdown file you've already written.")
+        uploaded = st.file_uploader(
+            "Choose a .md file",
+            type=["md"],
+            key="ctx_upload_file",
+            label_visibility="collapsed",
+        )
+        overwrite = st.checkbox(
+            "Overwrite if a file with this name already exists",
+            key="ctx_upload_overwrite",
+        )
+
+        if uploaded:
+            if uploaded.name.lower() == "readme.md":
+                st.error("`README.md` is reserved — choose a different filename.")
+                return
+            target = CONTEXT_DIR / uploaded.name
+            conflict = target.exists() and not overwrite
+            if conflict:
+                st.warning(
+                    f"`{uploaded.name}` already exists. "
+                    "Enable **Overwrite** to replace it."
+                )
+            if st.button(
+                f"Save `{uploaded.name}`",
+                icon=theme.ICON["save"],
+                key="ctx_upload_save",
+                type="primary",
+                disabled=conflict,
+            ):
+                CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+                try:
+                    target.write_bytes(uploaded.read())
+                    st.toast(
+                        f"Uploaded `{uploaded.name}`.",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Could not save: {e}")
+
+
 def _render_file_list(files: list[Path]) -> str | None:
-    """Bordered rows with View + Edit + Delete actions. Returns the
-    currently-open filename, or None.
-    """
+    """Bordered rows with View / Edit (AI) / Download / Delete actions.
+    Returns the currently-open filename, or None."""
     selection_key = "context_browser_choice"
     file_names = [f.name for f in files]
     current = st.session_state.get(selection_key)
@@ -160,7 +231,9 @@ def _render_file_list(files: list[Path]) -> str | None:
     for f in files:
         is_active = current == f.name
         with st.container(border=True):
-            name_col, view_col, edit_col, del_col = st.columns([8, 0.7, 0.7, 0.7])
+            name_col, view_col, edit_col, dl_col, del_col = st.columns(
+                [8, 0.7, 0.7, 0.7, 0.7]
+            )
 
             with name_col:
                 st.markdown(f"**{f.name}**")
@@ -190,6 +263,22 @@ def _render_file_list(files: list[Path]) -> str | None:
                 ):
                     context_chat.open_for_general_existing(f.name)
                     st.rerun()
+
+            with dl_col:
+                try:
+                    file_bytes = f.read_bytes()
+                except OSError:
+                    file_bytes = b""
+                st.download_button(
+                    "",
+                    data=file_bytes,
+                    file_name=f.name,
+                    mime="text/markdown",
+                    icon=":material/download:",
+                    help="Download",
+                    key=f"ctx_dl_{f.name}",
+                    use_container_width=True,
+                )
 
             with del_col:
                 if st.button(
