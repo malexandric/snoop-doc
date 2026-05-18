@@ -3,6 +3,7 @@ anthropic>=0.40
 pandas>=2.2
 numpy>=1.26
 plotly>=5.20
+statsmodels>=0.14
 python-dotenv>=1.0
 
 # Google Sheets live sync (optional but recommended — wire up via Settings)
