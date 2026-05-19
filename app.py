@@ -323,6 +323,12 @@ def save_settings() -> None:
                 "stripe_sync_on_start": st.session_state.get(
                     "stripe_sync_on_start", DEFAULT_STRIPE_SYNC_ON_START
                 ),
+                "slack_bot_token": st.session_state.get(
+                    "slack_bot_token", DEFAULT_SLACK_BOT_TOKEN
+                ),
+                "slack_app_token": st.session_state.get(
+                    "slack_app_token", DEFAULT_SLACK_APP_TOKEN
+                ),
             },
             indent=2,
         ),
@@ -620,6 +626,58 @@ def _do_google_connect() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Slack integration settings
+# ---------------------------------------------------------------------------
+DEFAULT_SLACK_BOT_TOKEN = ""
+DEFAULT_SLACK_APP_TOKEN = ""
+
+
+def _render_slack_settings_section() -> tuple[str, str]:
+    """Render the Slack Bot block. Returns (bot_token, app_token)."""
+    st.caption(
+        "Connect a Slack app so you can ask `@snoop` questions directly "
+        "from any Slack channel. The bot runs as a separate process "
+        "(`python slack_bot.py`) alongside the web app — see **SETUP_SLACK.md** "
+        "for the full setup guide."
+    )
+
+    bot_token_input = st.text_input(
+        "Bot Token (`xoxb-…`)",
+        value=st.session_state.get("slack_bot_token", DEFAULT_SLACK_BOT_TOKEN),
+        type="password",
+        key="_slack_bot_token_input",
+        help="OAuth Bot Token from your Slack app's OAuth & Permissions page.",
+    )
+    app_token_input = st.text_input(
+        "App-Level Token (`xapp-…`)",
+        value=st.session_state.get("slack_app_token", DEFAULT_SLACK_APP_TOKEN),
+        type="password",
+        key="_slack_app_token_input",
+        help="Generated under your Slack app's Basic Information → App-Level Tokens. Needs the `connections:write` scope.",
+    )
+
+    if bot_token_input and app_token_input:
+        st.success(
+            "Tokens configured. Click **Save integrations**, then run "
+            "`python slack_bot.py` to start the bot.",
+            icon=":material/check_circle:",
+        )
+    elif bot_token_input or app_token_input:
+        st.info(
+            "Both tokens are needed — Bot Token and App-Level Token.",
+            icon=":material/info:",
+        )
+    else:
+        st.info(
+            "No tokens set. Follow **SETUP_SLACK.md** to create a Slack app, "
+            "then paste the tokens here.",
+            icon=":material/slack:",
+        )
+
+    return bot_token_input, app_token_input
+
+
+# ---------------------------------------------------------------------------
 # Integrations view — full page for wiring external data sources
 # ---------------------------------------------------------------------------
 def render_integrations_view() -> None:
@@ -650,6 +708,10 @@ def render_integrations_view() -> None:
     stripe_api_key_input, stripe_sync_on_start_input = _render_stripe_settings_section()
 
     st.divider()
+    st.markdown("### Slack Bot")
+    slack_bot_token_input, slack_app_token_input = _render_slack_settings_section()
+
+    st.divider()
     save_col, _spacer = st.columns([1, 3])
     with save_col:
         if st.button(
@@ -662,6 +724,8 @@ def render_integrations_view() -> None:
             st.session_state.google_sync_on_start = bool(google_sync_on_start_input)
             st.session_state.stripe_api_key = stripe_api_key_input
             st.session_state.stripe_sync_on_start = bool(stripe_sync_on_start_input)
+            st.session_state.slack_bot_token = slack_bot_token_input
+            st.session_state.slack_app_token = slack_app_token_input
             save_settings()
             st.toast("Integrations saved.", icon=":material/check_circle:")
             st.rerun()
@@ -923,6 +987,14 @@ if "stripe_api_key" not in st.session_state:
 if "stripe_sync_on_start" not in st.session_state:
     st.session_state.stripe_sync_on_start = bool(
         _saved.get("stripe_sync_on_start", DEFAULT_STRIPE_SYNC_ON_START)
+    )
+if "slack_bot_token" not in st.session_state:
+    st.session_state.slack_bot_token = str(
+        _saved.get("slack_bot_token", DEFAULT_SLACK_BOT_TOKEN)
+    )
+if "slack_app_token" not in st.session_state:
+    st.session_state.slack_app_token = str(
+        _saved.get("slack_app_token", DEFAULT_SLACK_APP_TOKEN)
     )
 if "saved_questions" not in st.session_state:
     st.session_state.saved_questions = load_saved_questions()
