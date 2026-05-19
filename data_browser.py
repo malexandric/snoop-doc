@@ -44,6 +44,9 @@ def render() -> None:
     # as `context_chat.maybe_render`: opens whenever a session_state flag
     # is set, persists across reruns inside the dialog.
     _maybe_render_context_dialog()
+    # Rename dialog — same single-flag pattern. Opens whenever the row's
+    # rename button is clicked; cleared on save/cancel.
+    _maybe_render_rename_dialog()
 
     st.subheader("Data")
     st.caption(
@@ -244,17 +247,19 @@ def _render_file_list_with_actions(
 
         with st.container(border=True):
             if show_context_action:
-                # 5 columns when context is shown: name + 4 action buttons
-                # in this order: Sync / View / Context / Delete. Sync sits
-                # first because that's the action most likely to be taken
-                # on a synced file. Narrow action columns so the icon
-                # buttons read as icons. Sync column renders an empty
-                # placeholder for non-synced files so the layout doesn't
-                # jitter between rows.
-                name_col, sync_col, view_col, ctx_col, del_col = st.columns([8, 0.7, 0.7, 0.7, 0.7])
+                # 6 columns when context is shown: name + 5 action buttons
+                # in this order: Sync / View / Context / Rename / Delete.
+                # Sync sits first because that's the action most likely
+                # to be taken on a synced file. Narrow action columns so
+                # the icon buttons read as icons. Sync + Rename columns
+                # render empty placeholders for rows where the action
+                # doesn't apply so the layout doesn't jitter between rows.
+                name_col, sync_col, view_col, ctx_col, rename_col, del_col = st.columns(
+                    [8, 0.7, 0.7, 0.7, 0.7, 0.7]
+                )
             else:
                 name_col, view_col, del_col = st.columns([8, 0.7, 0.7])
-                ctx_col = sync_col = None
+                ctx_col = sync_col = rename_col = None
 
             with name_col:
                 st.markdown(f"**{f.name}**")
@@ -318,6 +323,24 @@ def _render_file_list_with_actions(
                         use_container_width=True,
                     ):
                         st.session_state["_context_dialog_csv"] = f.name
+                        st.rerun()
+
+            if rename_col is not None:
+                with rename_col:
+                    # Stripe-synced filenames are canonical (stripe_invoices.csv etc.);
+                    # renaming would just leave the renamed file stranded since the
+                    # next sync writes the canonical name again. Show a disabled-
+                    # ish placeholder for those rows so the column lines up.
+                    if stripe_key is not None:
+                        st.write("")
+                    elif st.button(
+                        "",
+                        icon=":material/text_fields:",
+                        help="Rename",
+                        key=f"{key_prefix}_rename_{f.name}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["_rename_dialog_csv"] = f.name
                         st.rerun()
 
             with del_col:
@@ -1241,6 +1264,153 @@ def _show_context_dialog(csv_name: str) -> None:
     ):
         st.session_state.pop("_context_dialog_csv", None)
         st.rerun()
+
+
+def _maybe_render_rename_dialog() -> None:
+    """Open the rename dialog if a CSV has been queued for it. Same
+    session_state-flag pattern as the context dialog: row button sets
+    `_rename_dialog_csv`, dialog clears it on Save/Cancel.
+    """
+    csv_name = st.session_state.get("_rename_dialog_csv")
+    if not csv_name:
+        return
+    if not (TABLES_DIR / csv_name).exists():
+        st.session_state.pop("_rename_dialog_csv", None)
+        return
+    if stripe_sync.is_stripe_synced_file(csv_name):
+        # Defensive — the button is hidden for Stripe rows, but if the
+        # flag got set some other way, refuse rather than break the sync.
+        st.session_state.pop("_rename_dialog_csv", None)
+        return
+    _show_rename_dialog(csv_name)
+
+
+@st.dialog("Rename file", width="small")
+def _show_rename_dialog(csv_name: str) -> None:
+    """Rename a CSV + all the things that reference it by filename:
+      - the matching per-file context doc (data/context/tables/<stem>.md)
+      - schema-doc pointer entries in any general doc's `covers:` list
+      - the Google Sheets sync registry's `target_filename`, if applicable
+      - the currently-open file selection in session state, so the editor
+        doesn't snap shut on the renamed file
+
+    Stripe-synced files don't reach this dialog (canonical filenames).
+    """
+    st.markdown(f"Renaming **`{csv_name}`**")
+
+    gs_entry = gsheets.find_entry_by_filename(csv_name)
+    if gs_entry is not None:
+        st.caption(
+            f":material/cloud_sync: This file syncs from Google Sheets "
+            f"(`{gs_entry.sheet_title}` › `{gs_entry.tab_name_at_sync}`). "
+            "The sync registry will be updated so future syncs write to "
+            "the new name."
+        )
+
+    state_key = f"_rename_dialog_input_{csv_name}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = csv_name
+    new_name = st.text_input(
+        "New filename",
+        key=state_key,
+        help="`.csv` extension added automatically if missing.",
+    )
+
+    save_col, cancel_col = st.columns(2)
+    with save_col:
+        if st.button(
+            "Save",
+            type="primary",
+            icon=":material/save:",
+            key=f"_rename_dialog_save_{csv_name}",
+            use_container_width=True,
+        ):
+            _do_rename(csv_name, new_name, gs_entry, state_key)
+    with cancel_col:
+        if st.button(
+            "Cancel",
+            key=f"_rename_dialog_cancel_{csv_name}",
+            use_container_width=True,
+        ):
+            st.session_state.pop("_rename_dialog_csv", None)
+            st.session_state.pop(state_key, None)
+            st.rerun()
+
+
+def _do_rename(
+    old_name: str,
+    new_name_raw: str,
+    gs_entry: gsheets.SyncEntry | None,
+    state_key: str,
+) -> None:
+    """Apply a rename across CSV + context doc + pointers + sync registry.
+    Surfaces validation errors inline in the dialog; on success closes
+    the dialog with a toast.
+    """
+    new_name = (new_name_raw or "").strip()
+    if not new_name:
+        st.error("Filename can't be empty.")
+        return
+    if not new_name.lower().endswith(".csv"):
+        new_name += ".csv"
+    if new_name == old_name:
+        # No-op, just close the dialog cleanly.
+        st.session_state.pop("_rename_dialog_csv", None)
+        st.session_state.pop(state_key, None)
+        st.rerun()
+        return
+
+    old_path = TABLES_DIR / old_name
+    new_path = TABLES_DIR / new_name
+    if new_path.exists():
+        st.error(f"`{new_name}` already exists in `data/tables/`.")
+        return
+
+    # 1. Rename the CSV.
+    try:
+        old_path.rename(new_path)
+    except OSError as e:
+        st.error(f"Could not rename CSV: {e}")
+        return
+
+    # 2. Rename the matching per-file context doc, if any. Best-effort —
+    # a failure here doesn't unwind the CSV rename; we surface a warning
+    # instead so the user can clean up by hand if needed.
+    old_ctx = _context_path_for_csv(old_name)
+    new_ctx = _context_path_for_csv(new_name)
+    if old_ctx.exists():
+        try:
+            old_ctx.rename(new_ctx)
+        except OSError as e:
+            st.warning(f"Renamed CSV but couldn't rename context doc: {e}")
+
+    # 3. Update schema-doc pointer entries in any general doc that
+    # references the old filename in its `covers:` list.
+    try:
+        context_pointers.rename_csv(old_name, new_name)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Renamed CSV but couldn't update context pointers: {e}")
+
+    # 4. Update the Google Sheets registry's target_filename so future
+    # syncs write to the new name. SyncEntry is a dataclass — mutate +
+    # upsert by id.
+    if gs_entry is not None:
+        try:
+            gs_entry.target_filename = new_name
+            gsheets.upsert_entry(gs_entry)
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"Renamed CSV but couldn't update Sheets sync registry: {e}")
+
+    # 5. If the editor was open on this file, move the selection to the
+    # new filename so it doesn't snap shut.
+    for sk in ("tables_browser_choice",):
+        if st.session_state.get(sk) == old_name:
+            st.session_state[sk] = new_name
+
+    st.session_state.pop("_rename_dialog_csv", None)
+    st.session_state.pop(state_key, None)
+    st.toast(f"Renamed to `{new_name}`.", icon=":material/done:")
+    st.rerun()
 
 
 def _do_gs_import(

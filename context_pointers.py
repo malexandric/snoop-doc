@@ -175,3 +175,32 @@ def set_pointer(csv_filename: str, general_doc_name: str | None) -> None:
 def general_doc_names() -> list[str]:
     """List of filenames (e.g. `pnl.md`) for use in dropdowns."""
     return [p.name for p in _list_general_docs()]
+
+
+def rename_csv(old_filename: str, new_filename: str) -> int:
+    """Rewrite every general doc's `covers:` list, replacing
+    `old_filename` with `new_filename`. Returns the number of docs
+    actually changed. No-op for docs that don't mention the old name.
+    Called from the Data view's rename action so a CSV rename doesn't
+    leave dangling pointer references.
+    """
+    if old_filename == new_filename:
+        return 0
+    changed = 0
+    for doc_path in _list_general_docs():
+        try:
+            text = doc_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        meta, body = parse_frontmatter(text)
+        covers = meta.get("covers")
+        if not isinstance(covers, list) or old_filename not in covers:
+            continue
+        new_covers = [new_filename if c == old_filename else c for c in covers]
+        meta["covers"] = new_covers
+        try:
+            doc_path.write_text(serialize(meta, body), encoding="utf-8")
+            changed += 1
+        except OSError:
+            continue
+    return changed
