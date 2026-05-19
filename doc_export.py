@@ -65,11 +65,30 @@ def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> by
     return dataframes_to_excel_bytes({sheet_name: df})
 
 
+# Excel sheet names can't contain these and can't be empty; max 31 chars.
+_INVALID_SHEET_CHARS = set(r":\/?*[]")
+
+
+def _sanitize_sheet_name(raw: str, default: str = "Sheet1") -> str:
+    """Make a string safe as an Excel sheet title.
+
+    Excel rejects sheet names containing `:` `\\` `/` `?` `*` `[` `]`
+    or longer than 31 characters, and won't accept an empty name.
+    Replace illegal characters with `-`, truncate to 31, fall back to
+    `default` if the result is empty after stripping.
+    """
+    cleaned = "".join("-" if ch in _INVALID_SHEET_CHARS else ch for ch in str(raw))
+    cleaned = cleaned.strip()[:31]
+    return cleaned or default
+
+
 def dataframes_to_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
     """Serialise multiple DataFrames to a single .xlsx workbook.
 
-    Each key in `sheets` becomes a sheet tab (truncated to 31 chars — the
-    Excel limit). Column widths are auto-fitted; header rows are bold.
+    Each key in `sheets` becomes a sheet tab. Names are sanitised for
+    Excel's restrictions (`:` `\\` `/` `?` `*` `[` `]` not allowed, 31-
+    char max) via `_sanitize_sheet_name`. Column widths are auto-fitted;
+    header rows are bold.
 
     Raises RuntimeError if openpyxl is not installed.
     """
@@ -79,7 +98,7 @@ def dataframes_to_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for raw_name, df in sheets.items():
-            safe_name = str(raw_name)[:31]
+            safe_name = _sanitize_sheet_name(raw_name)
             df.to_excel(writer, sheet_name=safe_name, index=False)
             ws = writer.sheets[safe_name]
             _autofit_columns(ws, df)
