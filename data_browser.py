@@ -126,6 +126,44 @@ _STALENESS_ICON = {
 }
 
 
+@st.cache_data(show_spinner=False)
+def _read_csv_bytes(path_str: str, mtime_ns: int) -> bytes:
+    """Cache file contents per session, keyed by mtime. Backs the
+    per-row Download button: without caching we'd re-read every CSV
+    visible on screen on every Streamlit rerun, which is bad when the
+    Stripe tables are hundreds of MB. Cache invalidates automatically
+    when a file is rewritten (different mtime_ns)."""
+    return Path(path_str).read_bytes()
+
+
+@st.cache_data(show_spinner=False)
+def _build_data_zip(_signature: tuple) -> bytes:
+    """Pack every CSV under `data/tables/` into an in-memory zip.
+
+    `_signature` (passed in by the caller as a tuple of
+    `(filename, mtime_ns)` for every CSV) is what Streamlit's cache
+    keys on — so the zip only rebuilds when a CSV is added, removed,
+    or rewritten. Without this we'd repack every CSV on every Streamlit
+    rerun, which is heavy when the Stripe tables are large.
+    """
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for csv_path in _list_files(TABLES_DIR, ".csv"):
+            zf.write(csv_path, arcname=csv_path.name)
+    return buf.getvalue()
+
+
+def _data_zip_signature() -> tuple:
+    """Tuple of `(filename, mtime_ns)` for every CSV — cheap to compute
+    on each render, used as the cache key for `_build_data_zip`."""
+    return tuple(
+        (p.name, p.stat().st_mtime_ns) for p in _list_files(TABLES_DIR, ".csv")
+    )
+
+
 def _render_gsheets_sync_caption(entry: gsheets.SyncEntry) -> None:
     label = gsheets.staleness_label(entry)
     band = gsheets.staleness_band(entry)
@@ -248,19 +286,21 @@ def _render_file_list_with_actions(
 
         with st.container(border=True):
             if show_context_action:
-                # 6 columns when context is shown: name + 5 action buttons
-                # in this order: Sync / View / Context / Rename / Delete.
-                # Sync sits first because that's the action most likely
-                # to be taken on a synced file. Narrow action columns so
-                # the icon buttons read as icons. Sync + Rename columns
-                # render empty placeholders for rows where the action
-                # doesn't apply so the layout doesn't jitter between rows.
-                name_col, sync_col, view_col, ctx_col, rename_col, del_col = st.columns(
-                    [8, 0.7, 0.7, 0.7, 0.7, 0.7]
+                # 7 columns when context is shown: name + 6 action buttons
+                # in this order: Sync / View / Download / Context / Rename
+                # / Delete. Sync sits first because it's the most likely
+                # action on a synced file; Download is grouped next to
+                # View since both are "get the data" actions. Narrow
+                # action columns so the icon buttons read as icons.
+                # Sync + Rename columns render empty placeholders for
+                # rows where the action doesn't apply so the layout
+                # doesn't jitter between rows.
+                name_col, sync_col, view_col, download_col, ctx_col, rename_col, del_col = st.columns(
+                    [8, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
                 )
             else:
                 name_col, view_col, del_col = st.columns([8, 0.7, 0.7])
-                ctx_col = sync_col = rename_col = None
+                ctx_col = sync_col = rename_col = download_col = None
 
             with name_col:
                 st.markdown(f"**{f.name}**")
@@ -312,6 +352,22 @@ def _render_file_list_with_actions(
                     else:
                         st.session_state[selection_key] = f.name
                     st.rerun()
+
+            if download_col is not None:
+                with download_col:
+                    # Cached read so we don't re-load every visible CSV on
+                    # every rerun. The mtime_ns argument keys the cache so
+                    # a rewritten file invalidates automatically.
+                    st.download_button(
+                        "",
+                        data=_read_csv_bytes(str(f), f.stat().st_mtime_ns),
+                        file_name=f.name,
+                        mime="text/csv",
+                        icon=":material/download:",
+                        help="Download CSV",
+                        key=f"{key_prefix}_download_{f.name}",
+                        use_container_width=True,
+                    )
 
             if ctx_col is not None:
                 with ctx_col:
@@ -788,10 +844,27 @@ def _render_tables() -> None:
     ]
     has_anything_to_sync = bool(gs_registry) or bool(stripe_synced_keys)
 
-    header_left, header_right = st.columns([3, 1])
-    with header_left:
+    # Header row: file count + Export-all + Sync-all. Sync-all only shows
+    # when there's something to sync; Export-all is always available so
+    # users have a one-click "snapshot everything" path regardless of
+    # whether they're using any sync integrations.
+    from datetime import date
+
+    header_count, header_export, header_sync = st.columns([2, 1, 1])
+    with header_count:
         st.markdown(f"**{len(files)} file{'s' if len(files) != 1 else ''}**")
-    with header_right:
+    with header_export:
+        st.download_button(
+            "Export all",
+            data=_build_data_zip(_data_zip_signature()),
+            file_name=f"snoop-data-{date.today().isoformat()}.zip",
+            mime="application/zip",
+            icon=":material/download:",
+            key="_tables_export_all",
+            use_container_width=True,
+            help="Download every CSV in `data/tables/` as a single zip.",
+        )
+    with header_sync:
         if has_anything_to_sync:
             help_parts = []
             if gs_registry:
