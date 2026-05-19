@@ -1,26 +1,58 @@
 # Snoop Doc
 
-Ask your company's data questions in plain English and get answers, charts, and tables back. Snoop wraps Anthropic's Claude with a Python sandbox that runs pandas against your CSVs, so the model can compute real numbers (not hallucinate them) and draw real charts inline.
+**A data-analysis platform you can talk to.** Drop in your spreadsheets, sync from any data source — finance, marketing, ads, product, ops, whatever your team works with — and ask questions in plain English. Snoop runs real Python against the real data under the hood, so the numbers are computed, not generated.
 
-Built for an internal finance + marketing + leadership team.
+## What makes it different from a generic AI chat
+
+- **Context that compounds.** Snoop captures your team's institutional knowledge as you use it — schema docs that explain messy column names, business rules that say what counts as "revenue", durable memory for the facts you only want to teach it once. The agent reads all of it on every question. The same query that gets a generic answer from ChatGPT gets *your team's* answer from Snoop.
+
+- **Trust on every answer.** Each response shows a **confidence level** and the **sources** it drew from — which CSVs, which context docs, which web pages. The numbers come from real pandas operations against your data, not language-model guesses. You can defend any answer in a meeting because you can see exactly where it came from.
+
+- **Memory that learns.** Tell Snoop a fact once ("our fiscal year runs July–June", "PR retainer doesn't count as marketing spend") and it remembers — auto-loaded into every future conversation, for every teammate. Snoop becomes a team member who knows your business, not a stranger you re-onboard daily.
+
+- **Knowledge artifacts.** Pin questions, save charts and tables, package whole exchanges as self-contained HTML or PDF reports, save and resume entire conversations. The work doesn't disappear into chat history; it accumulates.
+
+- **Every data source, one shape.** Stripe and Google Sheets sync to clean CSVs today; Excel workbooks, PDFs and Word docs can be imported on demand. The sync pattern generalises — every new integration just adds files to a folder the agent already knows how to query. Use Snoop through the web app or as a `@snoop` Slack bot in any channel.
 
 ## What you get
 
-- **Ask the Snoop** — a chat that runs Python under the hood. Claude can inspect the data, write pandas, draw Plotly charts, and self-correct on errors across multiple tool calls in a single turn. Every answer is computed live from the actual data, with a **confidence level** and source references appended so you know how much to trust each number.
-- **Slack bot** — `@snoop` in any Slack channel where the bot is invited and get the same answers in a thread. Runs as a separate long-lived process alongside the web app, sharing the same data + context files. See [SETUP_SLACK.md](SETUP_SLACK.md).
-- **Google Sheets live sync** — paste a sheet URL, pick a tab, and Snoop materialises it as a CSV that stays one click away from fresh. OAuth via your Workspace account; per-user tokens, shared sync registry. See setup below.
-- **Stripe live sync** — pulls customers, subscriptions, invoices, charges, products, prices, balance transactions, and more into 15 CSVs the agent can query. Restricted API key, incremental refresh after the first pull. See setup below.
-- **Data** — drag-and-drop **CSV or Excel** upload (Excel workbooks open a sheet-picker dialog that turns each sheet into its own CSV). In-place row/cell editing, per-file **rename / delete / download**, **Export all** as a zip. Every file gets a one-click "Context" button.
-- **Context** — manage company-wide context docs (org structure, glossary, fiscal calendar, accounting conventions). General docs are always loaded into the chat; per-file docs are loaded only when the matching CSV is in scope. **Import from PDF / Word / plain text** — text is extracted and saved as a context doc. **Export** general docs as a zip.
-- **Schema-doc pointers** — point a CSV at a general context doc (e.g. all P&L files → `pnl.md`, all Stripe tables → `stripe.md`) and that doc becomes the canonical schema reference for those files. The agent reads it on every turn, so it knows column conventions, aggregation traps, and canonical query snippets without having to guess from raw column names.
+In rough order:
+
+### The core chat
+
+- **Ask the Snoop** — a chat that runs Python under the hood. Claude can inspect the data, write pandas, draw Plotly charts, and self-correct on errors across multiple tool calls in a single turn. Every answer is computed live from the actual data. Each response carries a **confidence level** and a list of sources used, so you know how much to trust each number and where it came from.
+
+### Context and memory (the trust layer)
+
+- **Context** — manage company-wide context docs (org structure, glossary, fiscal calendar, accounting conventions, business rules). General docs are always loaded into the chat; per-file docs are loaded only when the matching CSV is in scope. **Import from PDF / Word / plain text** — text is extracted and saved as a context doc you can edit.
+- **Schema-doc pointers** — point a CSV at a general context doc (e.g. all P&L files → `pnl.md`, all Stripe tables → `stripe.md`) and that doc becomes the canonical schema reference. The agent reads it on every turn, so it knows column conventions, aggregation traps, and canonical query snippets without having to guess from raw column names.
+- **Agent memory** — Snoop saves durable facts the user teaches it to a memory file that auto-loads into every future conversation. Visible in the chat and editable via the Context view.
+- **AI context editor** — modal chat that drafts a precise context doc for a CSV or a group of CSVs. For per-file docs it sees a full data fingerprint and can run pandas to verify claims. For general/group docs it can call `load_table(name, nrows=20)` to inspect any CSV on demand — useful when writing docs that span many files.
+
+### Save your work
+
+- **Saved Items** — save any chart, table, full exchange, or whole conversation Claude produced. Tables can be promoted into `data/tables/` to feed the next analysis. **Save-as-report** packages a question + the assistant's response (text, charts, tables) as a self-contained HTML file you can email, archive, or open offline; PDF download available too. **Save chat** stores the entire thread so you can pick a saved conversation later and **Resume** it.
 - **Saved Questions** — pin frequently-asked questions and replay them with one click.
-- **Agent memory** — Snoop can save durable facts the user teaches it ("fiscal year is July–June", "PR retainer isn't part of marketing spend") to a memory file that auto-loads into every future conversation. Saves are visible in the chat and editable via the Context view.
+
+### Data — bring anything
+
+- **Stripe live sync** — 15 CSVs covering customers, subscriptions, invoices, payment intents, charges, refunds, disputes, payouts, balance transactions, products, prices, coupons, and promotion codes. Restricted API key, incremental refresh after the first pull.
+- **Google Sheets live sync** — paste a sheet URL, pick a tab, and Snoop materialises it as a CSV that stays one click away from fresh. OAuth via your Workspace account.
+- **Manual upload** — drag-and-drop **CSV or Excel**. Excel workbooks open a sheet-picker dialog that turns each sheet into its own CSV.
+- **Data view tools** — in-place row/cell editing, per-file **rename / delete / download**, **Export all** as a zip.
+
+### Use it from anywhere
+
+- **Slack bot** — `@snoop` in any Slack channel where the bot is invited and get the same answers in a thread. Runs as a separate long-lived process alongside the web app, sharing the same data + context files. See [SETUP_SLACK.md](SETUP_SLACK.md).
 - **Web search + fetch** — optional. Web fetch is always available so Snoop can pull any URL you mention. Web search is a toggle (off by default — costs extra per request) for when you need external info: exchange rates, industry benchmarks, news.
-- **Saved Items** — save any chart, table, full exchange, or whole conversation Claude produced. Tables can be promoted into `data/tables/` to feed the next analysis. **Save-as-report** packages a question + the assistant's response (text, charts, tables) as a self-contained HTML file you can email, archive, or open offline. Saved reports also offer a **PDF download** (text + tables; charts noted as HTML-only). Result tables in chat offer **Excel download** with bold headers and auto-fitted columns. **Save chat** stores the entire thread (every question + response + chart + table) so you can pick a saved conversation later and **Resume** it.
-- **Charts demo** — a gallery of every chart type Snoop can produce, with "when to use" notes against fake P&L data.
-- **AI context editor** — modal chat that drafts a precise context doc for a CSV (or a general doc). For per-file docs it sees a full data fingerprint and can run pandas to verify claims. For general docs it can call `load_table(name, nrows=20)` to inspect any CSV on demand — useful when writing group docs that span many files.
+
+### Steering the agent
+
 - **Scope picker** — narrow the conversation to a subset of CSVs to keep the system prompt lean and the agent focused.
-- **Token + cost meter** in the sidebar, **Quick mode** (force Haiku for cheap lookups), **Prefer charts** (auto-chart when the answer has 3+ comparable values), and a **Stop** button for runaway agent loops.
+- **Quick mode** — force Haiku for cheap, single-number lookups.
+- **Prefer charts** — auto-chart when the answer has 3+ comparable values.
+- **Token + cost meter** in the sidebar, and a **Stop** button for runaway agent loops.
+- **Charts demo** — a gallery of every chart type Snoop can produce, with "when to use" notes against fake P&L data. Useful for figuring out what to ask for.
 
 ## Stack
 
