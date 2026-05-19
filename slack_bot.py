@@ -42,6 +42,7 @@ import os
 import re
 import sys
 import textwrap
+import threading
 from pathlib import Path
 
 import snoop_agent
@@ -271,24 +272,48 @@ def build_app(config: dict):
 
     app = App(token=config["bot_token"])
 
+    # Cache the bot's own user ID once at startup to detect self-messages.
+    try:
+        bot_user_id: str = app.client.auth_test()["user_id"]
+    except Exception:  # noqa: BLE001
+        bot_user_id = ""
+
     # ------------------------------------------------------------------
-    # app_mention handler — fires when @snoop is mentioned in a channel
+    # app_mention handler — fires when @snoop is mentioned in a channel.
+    # Runs in a background thread so Bolt's event loop stays unblocked.
     # ------------------------------------------------------------------
     @app.event("app_mention")
     def handle_mention(event, say, client):
-        _handle_question(event, say, client, config)
+        threading.Thread(
+            target=_handle_question,
+            args=(event, say, client, config),
+            daemon=True,
+        ).start()
 
     # ------------------------------------------------------------------
-    # message.im handler — fires for DMs directly to the bot
+    # message.im handler — fires for DMs directly to the bot.
+    # Skip @mentions (handled by app_mention) and the bot's own messages.
     # ------------------------------------------------------------------
     @app.event("message")
     def handle_dm(event, say, client):
-        # Only handle DMs (channel type "im"), ignore bot's own messages
+        # Only handle DMs (channel type "im")
         if event.get("channel_type") != "im":
             return
+        # Skip bot messages and subtypes (message_changed, etc.)
         if event.get("bot_id") or event.get("subtype"):
             return
-        _handle_question(event, say, client, config)
+        # Skip the bot's own user messages
+        if bot_user_id and event.get("user") == bot_user_id:
+            return
+        # Skip @mention syntax — app_mention already handles those
+        text = event.get("text", "")
+        if re.match(r"^<@[A-Z0-9]+>", text):
+            return
+        threading.Thread(
+            target=_handle_question,
+            args=(event, say, client, config),
+            daemon=True,
+        ).start()
 
     return app, SocketModeHandler
 

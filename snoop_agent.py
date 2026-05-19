@@ -53,7 +53,7 @@ CONTEXT_TABLES_DIR = CONTEXT_DIR / "tables"
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_TEMPERATURE = 0.0
-MAX_ITERATIONS = 25  # hard cap to prevent runaway loops in headless mode
+MAX_ITERATIONS = 15  # hard cap to prevent runaway loops in headless mode
 
 ANTHROPIC_WEB_FETCH_TOOL: dict = {"type": "web_fetch_20250910", "name": "web_fetch"}
 
