@@ -27,6 +27,7 @@ from pathlib import Path
 import streamlit as st
 
 import context_chat
+import doc_import
 import theme
 from dialogs import confirm_or_run
 
@@ -174,48 +175,146 @@ def _render_new_doc() -> None:
 
 
 def _render_upload_doc() -> None:
-    """Upload a ready-made .md file directly, without AI involvement."""
-    with st.expander("Upload a context doc", icon=":material/upload_file:"):
-        st.caption("Drop in a Markdown file you've already written.")
+    """Import a document as a general context doc.
+
+    Accepts:
+      .md   — saved as-is.
+      .pdf  — text extracted with pypdf, saved as .md.
+      .docx — text extracted with python-docx, saved as .md.
+      .txt  — decoded and saved as .md.
+
+    For non-markdown formats the user can preview the extracted text,
+    rename the target file, and save it to `data/context/`.
+    """
+    with st.expander(
+        "Import a context doc (.md, .pdf, .docx, .txt)",
+        icon=":material/upload_file:",
+    ):
+        st.caption(
+            "Drop in a Markdown file you've written, or import a PDF, "
+            "Word doc, or plain-text file — Snoop extracts the text and "
+            "saves it as a context doc the AI reads on every conversation."
+        )
         uploaded = st.file_uploader(
-            "Choose a .md file",
-            type=["md"],
+            "Choose a file",
+            type=["md", "pdf", "docx", "txt"],
             key="ctx_upload_file",
             label_visibility="collapsed",
         )
-        overwrite = st.checkbox(
-            "Overwrite if a file with this name already exists",
-            key="ctx_upload_overwrite",
-        )
 
-        if uploaded:
-            if uploaded.name.lower() == "readme.md":
-                st.error("`README.md` is reserved — choose a different filename.")
-                return
-            target = CONTEXT_DIR / uploaded.name
-            conflict = target.exists() and not overwrite
-            if conflict:
-                st.warning(
-                    f"`{uploaded.name}` already exists. "
-                    "Enable **Overwrite** to replace it."
-                )
-            if st.button(
-                f"Save `{uploaded.name}`",
-                icon=theme.ICON["save"],
-                key="ctx_upload_save",
-                type="primary",
-                disabled=conflict,
-            ):
-                CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-                try:
-                    target.write_bytes(uploaded.read())
-                    st.toast(
-                        f"Uploaded `{uploaded.name}`.",
-                        icon=":material/check_circle:",
-                    )
-                    st.rerun()
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"Could not save: {e}")
+        if not uploaded:
+            return
+
+        ext = Path(uploaded.name).suffix.lower()
+        file_bytes = uploaded.getvalue()
+
+        if ext == ".md":
+            _render_md_upload(uploaded.name, file_bytes)
+        else:
+            _render_doc_text_import(uploaded.name, ext, file_bytes)
+
+
+def _render_md_upload(filename: str, file_bytes: bytes) -> None:
+    """Existing flow: save a .md file directly."""
+    if filename.lower() == "readme.md":
+        st.error("`README.md` is reserved — choose a different filename.")
+        return
+    overwrite = st.checkbox(
+        "Overwrite if a file with this name already exists",
+        key="ctx_upload_overwrite",
+    )
+    target = CONTEXT_DIR / filename
+    conflict = target.exists() and not overwrite
+    if conflict:
+        st.warning(f"`{filename}` already exists. Enable **Overwrite** to replace it.")
+    if st.button(
+        f"Save `{filename}`",
+        icon=theme.ICON["save"],
+        key="ctx_upload_save",
+        type="primary",
+        disabled=conflict,
+    ):
+        CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_bytes(file_bytes)
+            st.toast(f"Uploaded `{filename}`.", icon=":material/check_circle:")
+            st.rerun()
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Could not save: {e}")
+
+
+def _render_doc_text_import(filename: str, ext: str, file_bytes: bytes) -> None:
+    """Extract text from a PDF / DOCX / TXT and save as a context doc."""
+    # Extract text — do it once and cache in session_state keyed by filename.
+    cache_key = f"_ctx_import_text_{filename}"
+    if cache_key not in st.session_state:
+        try:
+            with st.spinner(f"Extracting text from `{filename}`…"):
+                if ext == ".pdf":
+                    text = doc_import.extract_pdf_text(file_bytes)
+                elif ext == ".docx":
+                    text = doc_import.extract_docx_text(file_bytes)
+                else:  # .txt
+                    text = doc_import.extract_txt_text(file_bytes)
+            st.session_state[cache_key] = text
+        except (RuntimeError, ValueError) as e:
+            st.error(str(e))
+            return
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Could not extract text: {e}")
+            return
+
+    text: str = st.session_state[cache_key]
+    if not text.strip():
+        st.warning("No text could be extracted from this document.")
+        return
+
+    st.success(f"Extracted {len(text):,} characters from `{filename}`.")
+    with st.expander("Preview extracted text", expanded=False):
+        preview = text[:3000] + ("…" if len(text) > 3000 else "")
+        st.text(preview)
+
+    stem = Path(filename).stem.lower().replace(" ", "_")
+    default_md_name = f"{stem}.md"
+
+    save_name = st.text_input(
+        "Save as",
+        value=default_md_name,
+        key="ctx_doc_import_name",
+        help="Saved into `data/context/` as a Markdown file.",
+    )
+    overwrite = st.checkbox(
+        "Overwrite if a file with this name already exists",
+        key="ctx_doc_import_overwrite",
+    )
+
+    clean_name = (save_name or "").strip()
+    if clean_name and not clean_name.endswith(".md"):
+        clean_name += ".md"
+
+    conflict = bool(clean_name) and (CONTEXT_DIR / clean_name).exists() and not overwrite
+    if conflict:
+        st.warning(f"`{clean_name}` already exists. Enable **Overwrite** to replace it.")
+
+    if st.button(
+        "Save as context doc",
+        icon=theme.ICON["save"],
+        key="ctx_doc_import_save",
+        type="primary",
+        disabled=not clean_name or conflict,
+    ):
+        CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            (CONTEXT_DIR / clean_name).write_text(text, encoding="utf-8")
+            # Drop the cached text so a new upload of the same filename starts fresh.
+            st.session_state.pop(cache_key, None)
+            st.toast(
+                f"Saved `{clean_name}` ({len(text):,} chars).",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Could not save: {e}")
 
 
 def _render_file_list(files: list[Path]) -> str | None:

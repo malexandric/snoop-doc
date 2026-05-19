@@ -14,6 +14,7 @@ import streamlit as st
 
 import context_chat
 import context_pointers
+import doc_import
 import gsheets
 import stripe_sync
 import theme
@@ -359,23 +360,26 @@ def _render_file_list_with_actions(
 
 
 # ---------------------------------------------------------------------------
-# CSV upload flow — with rename + optional context-file creation
+# File upload flow — CSV and Excel, with rename + optional context creation
 # ---------------------------------------------------------------------------
 CSV_UPLOADER_KEY = "_tables_uploader"
 
+_EXCEL_EXTS = {".xlsx", ".xls"}
 
-def _render_csv_upload() -> None:
-    """The CSV uploader. Detects new uploads and triggers a setup dialog
-    that lets the user rename the file and (optionally) create a matching
-    context doc with a generic template.
 
-    Uses a (name, size) signature to distinguish "user just dropped a new
-    file" from "we're still mid-dialog and the uploader hasn't been cleared
-    yet." Without it, the dialog re-opens on every rerun.
+def _render_file_upload() -> None:
+    """Unified uploader for CSV and Excel files.
+
+    Detects new uploads and routes to the appropriate setup dialog:
+      - .csv → rename dialog + optional AI context creation
+      - .xlsx / .xls → sheet-picker dialog → convert each sheet to a CSV
+
+    Uses a (name, size) signature to avoid re-opening the dialog on
+    every rerun while the uploader still holds the file reference.
     """
     uploaded = st.file_uploader(
-        "Drop a .csv file here",
-        type=["csv"],
+        "Drop a CSV or Excel file here",
+        type=["csv", "xlsx", "xls"],
         key=CSV_UPLOADER_KEY,
         label_visibility="collapsed",
     )
@@ -383,22 +387,24 @@ def _render_csv_upload() -> None:
         return
 
     sig = (uploaded.name, uploaded.size)
+    ext = Path(uploaded.name).suffix.lower()
     pending = st.session_state.get("_csv_upload_pending")
     handled = st.session_state.get("_csv_upload_handled_sig")
 
-    # New upload → stash bytes + open the setup dialog
     if pending is None and handled != sig:
         st.session_state._csv_upload_pending = {
             "data": uploaded.getvalue(),
             "original_name": uploaded.name,
             "sig": sig,
+            "ext": ext,
         }
 
-    # As long as we have a pending upload, keep the dialog open. Save /
-    # Cancel inside the dialog clear `_csv_upload_pending` and `_csv_upload_handled_sig`
-    # so we don't re-open on the next rerun.
     if "_csv_upload_pending" in st.session_state:
-        _show_csv_upload_setup_dialog()
+        pending_ext = st.session_state._csv_upload_pending.get("ext", ".csv")
+        if pending_ext in _EXCEL_EXTS:
+            _show_excel_upload_setup_dialog()
+        else:
+            _show_csv_upload_setup_dialog()
 
 
 def _clear_csv_upload_state(sig) -> None:
@@ -411,9 +417,170 @@ def _clear_csv_upload_state(sig) -> None:
         "_csv_setup_filename",
         "_csv_setup_create_ctx",
         "_csv_setup_template",
+        "_excel_sheets_cache",
         CSV_UPLOADER_KEY,
     ):
         st.session_state.pop(key, None)
+
+
+# ---------------------------------------------------------------------------
+# Excel import dialog — sheet picker + per-sheet filename inputs
+# ---------------------------------------------------------------------------
+@st.dialog("Import Excel workbook", width="large")
+def _show_excel_upload_setup_dialog() -> None:
+    """Parse the uploaded workbook, let the user pick which sheets to
+    import and what CSV name each gets, then write the CSVs to disk."""
+    pending = st.session_state.get("_csv_upload_pending")
+    if not pending:
+        return
+
+    original = pending["original_name"]
+    st.caption(f"Importing: `{original}`")
+
+    # Parse the workbook once and cache the sheets in session state so the
+    # dialog doesn't re-read the bytes on every widget interaction.
+    if "_excel_sheets_cache" not in st.session_state:
+        try:
+            with st.spinner("Reading workbook…"):
+                sheets = doc_import.read_excel_sheets(pending["data"])
+            st.session_state._excel_sheets_cache = sheets
+        except (RuntimeError, ValueError) as e:
+            st.error(str(e))
+            if st.button("Close", key="_excel_err_close"):
+                _clear_csv_upload_state(pending["sig"])
+                st.rerun()
+            return
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Unexpected error reading workbook: {e}")
+            if st.button("Close", key="_excel_err_close2"):
+                _clear_csv_upload_state(pending["sig"])
+                st.rerun()
+            return
+
+    sheets: dict = st.session_state._excel_sheets_cache
+    if not sheets:
+        st.warning("This workbook contains no sheets.")
+        if st.button("Close", key="_excel_no_sheets_close"):
+            _clear_csv_upload_state(pending["sig"])
+            st.rerun()
+        return
+
+    st.markdown(
+        f"Found **{len(sheets)} sheet{'s' if len(sheets) != 1 else ''}**. "
+        "Choose which to import and what to name each CSV."
+    )
+
+    workbook_stem = tools.sanitize_name(Path(original).stem) or "sheet"
+
+    # Collect per-sheet config from widgets.
+    sheet_configs: dict[str, dict] = {}
+    for sheet_name, df in sheets.items():
+        with st.container(border=True):
+            toggle_col, info_col = st.columns([4, 6])
+            with toggle_col:
+                enabled = st.toggle(
+                    f"**{sheet_name}**",
+                    value=True,
+                    key=f"_excel_toggle_{sheet_name}",
+                )
+            with info_col:
+                if len(df) == 0:
+                    st.caption("empty sheet")
+                else:
+                    st.caption(f"{len(df):,} rows × {len(df.columns)} columns")
+
+            if enabled:
+                suggested = tools.sanitize_name(sheet_name) or workbook_stem
+                filename = st.text_input(
+                    "Save as",
+                    value=f"{suggested}.csv",
+                    key=f"_excel_filename_{sheet_name}",
+                    help="Will be saved into `data/tables/`.",
+                )
+                sheet_configs[sheet_name] = {"df": df, "filename": filename.strip()}
+
+    if not any(sheet_configs.values()):
+        st.info("Enable at least one sheet to import.")
+
+    use_ai = st.toggle(
+        "Use AI to build context docs",
+        value=True,
+        key="_excel_use_ai",
+        help=(
+            "After saving, opens the AI context-chat for the first imported "
+            "sheet to help you document its columns and business meaning."
+        ),
+    )
+
+    st.markdown("---")
+    save_col, cancel_col = st.columns(2)
+
+    with save_col:
+        if st.button(
+            "Import",
+            type="primary",
+            icon=":material/cloud_download:",
+            key="_excel_import_btn",
+            use_container_width=True,
+        ):
+            enabled_sheets = {k: v for k, v in sheet_configs.items() if v}
+            if not enabled_sheets:
+                st.error("Enable at least one sheet to import.")
+                return
+
+            # Validate + normalise filenames before writing anything.
+            resolved: list[tuple[str, str, pd.DataFrame]] = []  # (sheet_name, csv_name, df)
+            seen_names: set[str] = set()
+            for sheet_name, cfg in enabled_sheets.items():
+                csv_name = cfg["filename"]
+                if not csv_name:
+                    st.error(f"Filename for sheet '{sheet_name}' is empty.")
+                    return
+                if not csv_name.lower().endswith(".csv"):
+                    csv_name += ".csv"
+                if csv_name in seen_names:
+                    st.error(f"Two sheets share the filename `{csv_name}`. Use distinct names.")
+                    return
+                if (TABLES_DIR / csv_name).exists():
+                    st.error(
+                        f"`{csv_name}` already exists in `data/tables/`. "
+                        "Choose a different name or delete the existing file first."
+                    )
+                    return
+                seen_names.add(csv_name)
+                resolved.append((sheet_name, csv_name, cfg["df"]))
+
+            # Write CSVs to disk.
+            TABLES_DIR.mkdir(parents=True, exist_ok=True)
+            first_csv: str | None = None
+            for _sheet_name, csv_name, df in resolved:
+                try:
+                    (TABLES_DIR / csv_name).write_text(
+                        df.to_csv(index=False), encoding="utf-8"
+                    )
+                    if first_csv is None:
+                        first_csv = csv_name
+                except OSError as e:
+                    st.error(f"Could not save `{csv_name}`: {e}")
+                    return
+
+            sig = pending["sig"]
+            _clear_csv_upload_state(sig)
+
+            if use_ai and first_csv:
+                context_chat.open_for_new_upload(first_csv)
+
+            n = len(resolved)
+            st.toast(
+                f"Imported {n} sheet{'s' if n != 1 else ''} as CSV{'s' if n != 1 else ''}.",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+
+    with cancel_col:
+        if st.button("Cancel", key="_excel_cancel_btn", use_container_width=True):
+            _clear_csv_upload_state(pending["sig"])
+            st.rerun()
 
 
 @st.dialog("Set up new data file", width="medium")
@@ -514,11 +681,12 @@ def _render_data_action_row() -> None:
     # and visually separating it from "Integrations" signals "this is the
     # manual path; below are the connected sources."
     if st.button(
-        "Upload a new CSV",
+        "Upload a data file",
         icon=":material/upload_file:",
         type="primary" if active == "upload" else "secondary",
         use_container_width=True,
         key="_data_action_upload",
+        help="Upload a CSV or Excel workbook (.xlsx / .xls).",
     ):
         _toggle("upload")
         st.rerun()
@@ -556,7 +724,7 @@ def _render_data_action_row() -> None:
 
     if active == "upload":
         with st.container(border=True):
-            _render_csv_upload()
+            _render_file_upload()
     elif active == "gsheets":
         with st.container(border=True):
             _render_google_sync_section()
