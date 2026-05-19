@@ -16,3 +16,11 @@ stripe>=10.0
 
 # Markdown → HTML conversion for the Save-as-report feature
 markdown>=3.5
+
+# Document import: read Excel workbooks, extract text from PDFs and Word docs
+openpyxl>=3.1
+pypdf>=4.0
+python-docx>=1.1
+
+# Document export: generate PDF reports
+fpdf2>=2.7.9

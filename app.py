@@ -24,6 +24,7 @@ import context_browser
 import context_pointers
 import data_browser
 import dialogs
+import doc_export
 import gsheets
 import memory
 import saved_items
@@ -1471,7 +1472,25 @@ def _render_block_in_assistant_bubble(block: dict, key_suffix: str) -> None:
         df = st.session_state.tables.get(tool_use_id)
         if df is not None:
             st.dataframe(df, use_container_width=True)
-            _spacer, save_col = st.columns([5, 1])
+            _spacer, dl_col, save_col = st.columns([5, 1, 1])
+            with dl_col:
+                try:
+                    excel_bytes = doc_export.dataframe_to_excel_bytes(df)
+                    st.download_button(
+                        "",
+                        data=excel_bytes,
+                        file_name="table.xlsx",
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument"
+                            ".spreadsheetml.sheet"
+                        ),
+                        icon=":material/table_view:",
+                        key=f"dl_tbl_{tool_use_id}_{key_suffix}",
+                        use_container_width=True,
+                        help="Download as Excel (.xlsx)",
+                    )
+                except RuntimeError:
+                    pass  # openpyxl not installed — skip silently
             with save_col:
                 if st.button(
                     "Save",

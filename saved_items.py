@@ -36,6 +36,7 @@ import plotly.io as pio
 import streamlit as st
 import streamlit.components.v1 as components
 
+import doc_export
 import reports
 from dialogs import confirm_or_run
 import theme
@@ -782,9 +783,15 @@ def _render_card(item_type: str, item: dict) -> None:
         st.caption(_friendly_date(item.get("created")))
 
         # Action row — narrow columns so the icon buttons read as icons.
-        # Conversations + tables + reports each have a 4th action (Resume,
-        # Use-as-data, Download respectively); other types have just 3.
-        n_actions = 4 if item_type in ("tables", "reports", "conversations") else 3
+        # tables and reports have 5 actions; conversations 4; charts 3.
+        if item_type == "tables":
+            n_actions = 5   # View · Rename · Delete · Use-as-data · Excel
+        elif item_type == "reports":
+            n_actions = 5   # View · Rename · Delete · HTML · PDF
+        elif item_type == "conversations":
+            n_actions = 4   # View · Rename · Delete · Resume
+        else:
+            n_actions = 3   # View · Rename · Delete
         action_cols = st.columns(n_actions)
 
         with action_cols[0]:
@@ -833,6 +840,28 @@ def _render_card(item_type: str, item: dict) -> None:
                 ):
                     default = item["name"].lower().replace(" ", "_") + ".csv"
                     show_promote_table_dialog(eid, default)
+            with action_cols[4]:
+                df = load_table(eid)
+                if df is not None:
+                    try:
+                        excel_bytes = doc_export.dataframe_to_excel_bytes(
+                            df, sheet_name=item["name"][:31]
+                        )
+                        st.download_button(
+                            "",
+                            data=excel_bytes,
+                            file_name=f"{item['name']}.xlsx",
+                            mime=(
+                                "application/vnd.openxmlformats-officedocument"
+                                ".spreadsheetml.sheet"
+                            ),
+                            icon=":material/table_view:",
+                            help="Download as Excel (.xlsx)",
+                            key=f"_download_excel_{eid}",
+                            use_container_width=True,
+                        )
+                    except RuntimeError:
+                        st.caption("Excel\nnot avail.")
         elif item_type == "reports":
             with action_cols[3]:
                 report_path = item["_content_path"]
@@ -843,10 +872,19 @@ def _render_card(item_type: str, item: dict) -> None:
                         file_name=f"{item['name']}.html",
                         mime="text/html",
                         icon=":material/download:",
-                        help="Download the self-contained HTML file.",
+                        help="Download as self-contained HTML",
                         key=f"_download_report_{eid}",
                         use_container_width=True,
                     )
+            with action_cols[4]:
+                if st.button(
+                    "",
+                    icon=":material/picture_as_pdf:",
+                    help="Download as PDF",
+                    key=f"_download_pdf_{eid}",
+                    use_container_width=True,
+                ):
+                    show_download_pdf_dialog(eid, item["name"])
         elif item_type == "conversations":
             with action_cols[3]:
                 if st.button(
@@ -996,6 +1034,37 @@ def show_view_item_dialog(item_type: str, eid: str) -> None:
         else:
             st.caption(f"{len(df):,} rows × {len(df.columns)} columns")
             st.dataframe(df, use_container_width=True)
+            # Download options below the table
+            csv_col, excel_col, _ = st.columns([1, 1, 2])
+            with csv_col:
+                st.download_button(
+                    "Download CSV",
+                    data=df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{item['name']}.csv",
+                    mime="text/csv",
+                    icon=":material/download:",
+                    key=f"_view_dl_csv_{eid}",
+                    use_container_width=True,
+                )
+            with excel_col:
+                try:
+                    excel_bytes = doc_export.dataframe_to_excel_bytes(
+                        df, sheet_name=item["name"][:31]
+                    )
+                    st.download_button(
+                        "Download Excel",
+                        data=excel_bytes,
+                        file_name=f"{item['name']}.xlsx",
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument"
+                            ".spreadsheetml.sheet"
+                        ),
+                        icon=":material/table_view:",
+                        key=f"_view_dl_excel_{eid}",
+                        use_container_width=True,
+                    )
+                except RuntimeError as e:
+                    st.caption(f"Excel export unavailable: {e}")
     elif item_type == "reports":
         html_str = load_report(eid)
         if html_str is None:
@@ -1008,6 +1077,91 @@ def show_view_item_dialog(item_type: str, eid: str) -> None:
             st.error("Could not load conversation.")
             return
         _render_conversation_readonly(payload)
+
+
+@st.dialog("Download as PDF", width="medium")
+def show_download_pdf_dialog(eid: str, report_name: str) -> None:
+    """Generate and offer a PDF download for a saved report.
+
+    Loads the saved report's HTML, extracts its content blocks from the
+    original report data, and renders a clean PDF via doc_export.
+    """
+    st.markdown(f"**{report_name}**")
+    st.caption(
+        "Charts are not embedded in the PDF — open the HTML version for "
+        "interactive charts. Characters outside the Latin alphabet may "
+        "appear as '?' in the PDF."
+    )
+
+    # We don't have the original assistant blocks stored separately, so we
+    # load the HTML and render it via a simplified path: wrap the full HTML
+    # in an iframe and let fpdf2 handle it as a text block. Instead, we
+    # derive the PDF from the stored HTML by treating the whole body as one
+    # text block. This is a simpler but still useful export.
+    html_str = load_report(eid)
+    if not html_str:
+        st.error("Could not load report content.")
+        return
+
+    try:
+        from fpdf import FPDF  # type: ignore  # noqa: F401
+    except ImportError:
+        st.error("fpdf2 is not installed. Run `pip install fpdf2` to enable PDF export.")
+        return
+
+    # Build a minimal set of "blocks" from the raw HTML for the PDF renderer.
+    # We wrap the HTML body text as a single text block so doc_export renders
+    # it cleanly without needing the original message structure.
+    import re as _re
+    body_match = _re.search(
+        r'<section class="response">(.*?)</section>', html_str, _re.DOTALL
+    )
+    body_html = body_match.group(1).strip() if body_match else html_str
+
+    try:
+        from fpdf import FPDF
+        from fpdf.enums import XPos, YPos
+        from datetime import datetime as _dt
+
+        pdf = FPDF()
+        pdf.set_margins(18, 18, 18)
+        pdf.set_auto_page_break(auto=True, margin=18)
+        pdf.add_page()
+
+        safe_name = doc_export._cp1252_safe(report_name)
+        generated_at = _dt.now().strftime("%B %d, %Y at %H:%M")
+        safe_meta = doc_export._cp1252_safe(f"Generated by Snoop Doc · {generated_at}")
+
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.multi_cell(0, 9, safe_name, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(120, 120, 120)
+        pdf.multi_cell(0, 5, safe_meta, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(4)
+        pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+        pdf.ln(6)
+
+        pdf.set_font("Helvetica", "", 10)
+        safe_body = doc_export._cp1252_safe(body_html)
+        pdf.write_html(safe_body)
+
+        buf = io.BytesIO()
+        pdf.output(buf)
+        pdf_bytes = buf.getvalue()
+
+        st.download_button(
+            "Download PDF",
+            data=pdf_bytes,
+            file_name=f"{report_name}.pdf",
+            mime="application/pdf",
+            icon=":material/picture_as_pdf:",
+            type="primary",
+            key=f"_dl_pdf_btn_{eid}",
+            use_container_width=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        st.error(f"PDF generation failed: {e}")
 
 
 def _render_conversation_readonly(payload: dict) -> None:
