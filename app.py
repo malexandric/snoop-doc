@@ -29,6 +29,7 @@ import gsheets
 import memory
 import saved_items
 import saved_questions
+import scheduled_tasks_view
 import stripe_sync
 import theme
 import tools
@@ -146,6 +147,7 @@ VIEW_DATA = "Data"
 VIEW_CONTEXT = "Context"
 VIEW_ITEMS = "Saved Items"
 VIEW_CHARTS = "Charts demo"
+VIEW_SCHEDULE = "Scheduled Tasks"
 VIEW_INTEGRATIONS = "Integrations"
 VIEW_SETTINGS = "Settings"
 
@@ -156,7 +158,7 @@ VIEW_SETTINGS = "Settings"
 # modals; they outgrew that. Integrations sits just above Settings in the
 # utility group so external-data wiring is one click away.
 PRIMARY_VIEWS = [VIEW_CHAT, VIEW_DATA, VIEW_CONTEXT, VIEW_SAVED, VIEW_ITEMS]
-UTILITY_VIEWS = [VIEW_CHARTS, VIEW_INTEGRATIONS, VIEW_SETTINGS]
+UTILITY_VIEWS = [VIEW_CHARTS, VIEW_SCHEDULE, VIEW_INTEGRATIONS, VIEW_SETTINGS]
 VIEWS = PRIMARY_VIEWS + UTILITY_VIEWS
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -1084,6 +1086,7 @@ NAV_ICONS = {
     VIEW_DATA: theme.ICON["data"],
     VIEW_CONTEXT: theme.ICON["context_doc"],
     VIEW_CHARTS: theme.ICON["charts"],
+    VIEW_SCHEDULE: theme.ICON["schedule"],
     VIEW_INTEGRATIONS: theme.ICON["integrations"],
     VIEW_SETTINGS: theme.ICON["settings"],
 }
@@ -2139,6 +2142,9 @@ elif current_view == VIEW_ITEMS:
 
 elif current_view == VIEW_CHARTS:
     chart_demo.render()
+
+elif current_view == VIEW_SCHEDULE:
+    scheduled_tasks_view.render()
 
 elif current_view == VIEW_DATA:
     data_browser.render()

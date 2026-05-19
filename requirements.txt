@@ -27,3 +27,6 @@ fpdf2>=2.7.9
 
 # Slack bot integration (optional — only needed when running slack_bot.py)
 slack_bolt>=1.18
+
+# Scheduled tasks daemon (optional — only needed when running scheduler.py)
+APScheduler>=3.10

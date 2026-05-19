@@ -386,6 +386,7 @@ ICON = {
     "tables": ":material/table_view:",
     "context_doc": ":material/description:",
     "integrations": ":material/hub:",
+    "schedule": ":material/schedule:",
     # Chart category section headers
     "trends": ":material/trending_up:",
     "compare": ":material/equalizer:",
