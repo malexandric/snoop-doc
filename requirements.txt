@@ -24,3 +24,6 @@ python-docx>=1.1
 
 # Document export: generate PDF reports
 fpdf2>=2.7.9
+
+# Slack bot integration (optional — only needed when running slack_bot.py)
+slack_bolt>=1.18
