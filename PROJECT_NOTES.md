@@ -436,55 +436,6 @@ In rough order added.
 
 ---
 
-## My TODOs (Milica)
-
-Things only you can do.
-
-- [ ] Decide which financial tables to include first (P&L by branch, per-product P&L, salaries, cashflow, …).
-- [ ] Export those tables as CSVs and drop them in `data/tables/`.
-- [ ] Write explainer markdown for each table in `data/context/` — column meanings, gotchas, how it joins to other tables.
-- [ ] Write a `company.md` context doc: what each branch does, fiscal calendar quirks, accounting conventions.
-- [ ] Write a `metrics.md` context doc: how "gross margin", "EBITDA" etc. are defined at this company specifically.
-- [ ] **Live-test the Stripe integration end-to-end with real data.** Everything's been designed and built against Stripe's API docs, not exercised against a real production-sized account. Plan:
-  - Create the restricted API key in the real Stripe dashboard with read access on all eleven resources (Customers, Subscriptions, Invoices, Charges, Refunds, Disputes, Payouts, Products, Prices, Coupons, Promotion Codes).
-  - Wire it up in Settings → Integrations → Stripe.
-  - Run the initial sync from the Data view, one object at a time in order (reference tables first to verify auth + small data flow; then customers; then the big pulls — invoices, charges). Note how long each takes vs. our estimates.
-  - **Look for shape mismatches.** The SDK objects in production may return fields slightly differently than the docs suggest (nested vs. flat, missing for older records, expanded by default vs. not). Open each `stripe_*.csv` and check:
-    - Are required fields all populated, or do many rows have empty values where we expected data?
-    - Are dates correctly ISO-formatted (`_ts_to_iso` working on every timestamp field)?
-    - Do `customer_id` / `subscription_id` / `invoice_id` joins actually line up between tables?
-    - For invoice_line_items: do invoices with >10 lines come through complete (the `auto_paging_iter()` fallback)?
-  - **Ask the agent five real finance questions** and see if it can answer them correctly:
-    1. *"What's our ARR right now? Show the MRR movement waterfall for last month."*
-    2. *"Top 20 customers by ARR."*
-    3. *"Refund rate by product last quarter."*
-    4. *"Which customers are on a discount, and what % discount are they getting?"*
-    5. *"Cash collected last month vs. revenue earned."*
-  - Each wrong / incomplete answer is a signal that either (a) a flattener is dropping a useful field, (b) the join pattern isn't obvious enough — needs a context doc, or (c) the data model itself needs adjustment.
-  - **Document the gotchas** in a `stripe.md` general context doc (or a `data_sources.md` section) — currency handling (Stripe stores amounts in cents), status nuance (`active` vs `past_due` vs `trialing`), annual-sub MRR amortization, etc. These are the things the agent needs to know that aren't in the column names.
-  - **Adjust flatteners** if real data reveals we're missing useful columns or carrying useless ones. Keep flatteners focused — every column the agent sees costs prompt-context budget. Better to add fields when a real question needs them than carry everything Stripe returns.
-- [ ] **Write `data_sources.md` — the cross-file glue.** A general context doc (`data/context/data_sources.md`, always loaded into the main chat) that indexes every CSV in `data/tables/` and tells the agent how they relate. Without this, cross-file questions ("compare revenue to marketing spend") rely on the model inferring relationships from column names, which is fragile. With it, the model knows the joins before it writes any pandas.
-  - **Structure to follow:**
-    1. **One-line intro** at the top: *"Index of every CSV in this project — what each one is for, what its grain is, and how it joins to the others. Use the join keys listed here; don't infer them from column names alone."*
-    2. **One section per CSV.** For each file, include:
-       - **Purpose** — one sentence on what this file represents.
-       - **Grain** — one row per *what*? (e.g. "one row per month per branch", "one row per employee per pay period").
-       - **Period covered** — date range, refresh cadence (monthly close? live-synced from Sheets?).
-       - **Joins to** — bullet list of other files in the project this one joins with, each line: `<other_file>` on `<key>` (note any caveats — naming differences, granularity mismatches).
-       - **Quirks worth flagging** — anything that bites on the first cross-file query (e.g. "branch names here include 'Inc' suffix; strip before joining to `salaries.csv`").
-    3. **Common joins section** at the bottom — 3–5 recurring patterns the team asks about, with the canonical pandas pattern. Example: *"P&L by department joined with headcount → `pnl_2026.merge(salaries.groupby(['month','dept']).size().reset_index(name='headcount'), on=['month','dept'])`."*
-  - **Keep it tight.** Aim for under 400 words across the whole doc. It's an index, not a tutorial. If a file's nuances need more depth, that belongs in its per-CSV doc-related context (`data/context/tables/<stem>.md`), not here.
-  - **Refresh trigger:** any time a new CSV is added to `data/tables/`, append a section. Any time a join key changes upstream, update the matching bullet.
-- [ ] Decide whether to scramble numbers for the demo or use real ones.
-- [ ] Confirm the Claude model IDs in `AVAILABLE_MODELS` (in `app.py`) match what's current.
-- [ ] Set up the GitHub repo and grant your colleague access.
-- [ ] Walk your colleague through `data/tables/README.md` and `data/context/README.md` so she knows the conventions.
-- [ ] Decide on a list of "demo script" questions you'll ask live during the showcase.
-- [ ] Test the full demo on the actual showcase laptop (wifi, projector, the works).
-- [ ] Record a backup screen recording of the demo working, in case live fails.
-
----
-
 ## Build TODOs (next features)
 
 Roughly in priority order.
