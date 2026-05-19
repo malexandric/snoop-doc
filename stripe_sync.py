@@ -16,8 +16,8 @@ Recommended Stripe permissions (set when creating the restricted key):
 read-only on Customers, Subscriptions, Invoices, Charges, Products,
 Prices.
 
-Data model — twelve CSVs
-------------------------
+Data model — fifteen CSVs
+-------------------------
 Core (high-volume, incremental sync):
 - `stripe_customers.csv`            — one row per customer
 - `stripe_subscriptions.csv`        — one row per subscription
@@ -29,6 +29,7 @@ Core (high-volume, incremental sync):
 - `stripe_refunds.csv`              — one row per refund
 - `stripe_disputes.csv`             — one row per dispute / chargeback
 - `stripe_payouts.csv`              — one row per payout to bank
+- `stripe_balance_transactions.csv` — one row per money-movement event (the universal "what hit the balance, in settlement currency" record; multi-currency reporting reads from here)
 
 Reference (small, full re-pull each sync):
 - `stripe_products.csv`             — product catalog
@@ -37,8 +38,10 @@ Reference (small, full re-pull each sync):
 - `stripe_promotion_codes.csv`      — redeemable codes that map to coupons
 
 These join on obvious keys (`customer_id`, `subscription_id`, `invoice_id`,
-`charge_id`, `product_id`, `price_id`, `coupon_id`). Document join patterns
-in your context docs.
+`charge_id`, `product_id`, `price_id`, `coupon_id`). Balance transactions
+join everywhere via `source` (a `ch_...` / `pyr_...` / `du_...` / `po_...`
+id matching the originating object). Document join patterns in your
+context docs.
 
 Sync model
 ----------
@@ -105,6 +108,9 @@ SYNC_ORDER = (
     "disputes",
     # Bank-facing — pulled last because it's tied to payments/refunds upstream.
     "payouts",
+    # Balance transactions reference every money-moving object above
+    # via `source`, so they're synced last as the universal join point.
+    "balance_transactions",
 )
 
 # Object keys that are synced as a side effect of their parent's sync,
@@ -753,6 +759,42 @@ def _flatten_payout(p) -> dict:
     }
 
 
+def _flatten_balance_transaction(bt) -> dict:
+    """Flatten a Stripe BalanceTransaction.
+
+    The universal "money moved" record — every charge, refund, dispute,
+    payout, fee, and adjustment generates exactly one BalanceTransaction.
+    Critical for multi-currency reporting because `amount`, `net`, and
+    `fee` are ALL in the account's settlement currency (e.g. EUR for an
+    EU-based account) regardless of the original currency of the source
+    object. Stripe did the FX conversion at the time of the transaction;
+    no FX table is needed on our side.
+
+    `source` links back to the originating object (`ch_...` for a charge,
+    `pyr_...` for a refund, `du_...` for a dispute, `po_...` for a
+    payout, etc.). Use `type` or `reporting_category` to slice:
+    `reporting_category` is Stripe's pre-rolled grouping for finance
+    reports and is usually more useful for P&L-style aggregation than
+    the lower-level `type` field.
+    """
+    return {
+        "id": bt.id,
+        "amount": getattr(bt, "amount", None),
+        "net": getattr(bt, "net", None),
+        "fee": getattr(bt, "fee", None),
+        "currency": getattr(bt, "currency", None),
+        "exchange_rate": getattr(bt, "exchange_rate", None),
+        "source": _id_of(getattr(bt, "source", None)),
+        "type": getattr(bt, "type", None),
+        "reporting_category": getattr(bt, "reporting_category", None),
+        "description": getattr(bt, "description", None),
+        "status": getattr(bt, "status", None),
+        "balance_type": getattr(bt, "balance_type", None),
+        "created": _ts_to_iso(getattr(bt, "created", None)),
+        "available_on": _ts_to_iso(getattr(bt, "available_on", None)),
+    }
+
+
 def _flatten_invoice_line_item(li, invoice_id: str) -> dict:
     # The `period` field is a small object with start + end Unix timestamps.
     period = getattr(li, "period", None)
@@ -830,6 +872,7 @@ SPECS: dict[str, ObjectSpec] = {
     "refunds":            ObjectSpec("refunds",            full_repull=False, label="Refunds"),
     "disputes":           ObjectSpec("disputes",           full_repull=False, label="Disputes"),
     "payouts":            ObjectSpec("payouts",            full_repull=False, label="Payouts"),
+    "balance_transactions": ObjectSpec("balance_transactions", full_repull=False, label="Balance transactions"),
 }
 
 
@@ -959,6 +1002,12 @@ def _fetch_object(
         for i, p in enumerate(_list_with_created_filter(stripe.Payout, since_ts)):
             rows.append(_flatten_payout(p))
             if on_progress and (i + 1) % 200 == 0:
+                on_progress(i + 1)
+
+    elif key == "balance_transactions":
+        for i, bt in enumerate(_list_with_created_filter(stripe.BalanceTransaction, since_ts)):
+            rows.append(_flatten_balance_transaction(bt))
+            if on_progress and (i + 1) % 500 == 0:
                 on_progress(i + 1)
 
     elif key == "products":
