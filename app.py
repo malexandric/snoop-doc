@@ -671,7 +671,7 @@ def _render_slack_settings_section() -> tuple[str, str]:
         st.info(
             "No tokens set. Follow **SETUP_SLACK.md** to create a Slack app, "
             "then paste the tokens here.",
-            icon=":material/slack:",
+            icon=":material/forum:",
         )
 
     return bot_token_input, app_token_input
