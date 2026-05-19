@@ -770,11 +770,11 @@ def _render_data_action_row() -> None:
         _toggle("upload")
         st.rerun()
 
-    # Integrations — 3-column row. Currently two filled (Google Sheets,
-    # Stripe); third slot reserved for the next integration we wire up
-    # (FastSpring / Freemius / Lemon Squeezy planned). Keeping a fixed
-    # 3-column layout means the row stays visually stable as integrations
-    # are added or temporarily removed.
+    # Integrations — 3-column row. Two integration toggles (Google
+    # Sheets, Stripe) and a "Sync all" meta-action that re-pulls every
+    # registered sync source at once. Sync all is conditional: only
+    # renders when there's at least one thing to sync; otherwise the
+    # slot stays empty so the row layout doesn't jitter.
     st.markdown("**Integrations**")
     int_col1, int_col2, int_col3 = st.columns(3)
     with int_col1:
@@ -797,9 +797,34 @@ def _render_data_action_row() -> None:
         ):
             _toggle("stripe")
             st.rerun()
-    # int_col3 intentionally left empty — placeholder for the next
-    # integration. When a third lands, slot it in here; when a fourth
-    # lands, drop a second row of three columns below.
+    with int_col3:
+        gs_registry_for_sync = gsheets.load_registry()
+        stripe_objects_for_sync = stripe_sync.load_registry().get("objects", {})
+        stripe_synced_for_sync = [
+            k for k in stripe_objects_for_sync
+            if k not in stripe_sync.SIDE_EFFECT_OBJECTS
+            and k in stripe_sync.SPECS
+        ]
+        has_anything_to_sync = bool(gs_registry_for_sync) or bool(stripe_synced_for_sync)
+        if has_anything_to_sync:
+            help_parts = []
+            if gs_registry_for_sync:
+                help_parts.append(f"{len(gs_registry_for_sync)} Google Sheet(s)")
+            if stripe_synced_for_sync:
+                help_parts.append(f"{len(stripe_synced_for_sync)} Stripe object type(s)")
+            if st.button(
+                "Sync all",
+                icon=":material/sync:",
+                key="_tables_sync_all",
+                use_container_width=True,
+                help="Re-pull every registered sync — " + " + ".join(help_parts) + ".",
+            ):
+                _do_sync_all_sources()
+                st.rerun()
+        else:
+            # Empty placeholder keeps the row stable when no sync sources
+            # are registered yet.
+            st.write("")
 
     if active == "upload":
         with st.container(border=True):
@@ -833,57 +858,23 @@ def _render_tables() -> None:
         )
         return
 
-    # Header row: file count + sync-all button (only shown if anything's
-    # registered across either sync source).
-    gs_registry = gsheets.load_registry()
-    stripe_objects = stripe_sync.load_registry().get("objects", {})
-    stripe_synced_keys = [
-        k for k in stripe_objects
-        if k not in stripe_sync.SIDE_EFFECT_OBJECTS
-        and k in stripe_sync.SPECS  # skip stale entries from old schemas
-    ]
-    has_anything_to_sync = bool(gs_registry) or bool(stripe_synced_keys)
-
-    # Header row: file count + Export-all + Sync-all. Sync-all only shows
-    # when there's something to sync; Export-all is always available so
-    # users have a one-click "snapshot everything" path regardless of
-    # whether they're using any sync integrations.
+    # File count on its own marker line, then Export-all as a full-width
+    # button on its own line. Sync all lives in the Integrations row
+    # above (alongside the per-integration toggles), since it's a meta-
+    # action over the integration set.
     from datetime import date
 
-    header_count, header_export, header_sync = st.columns([2, 1, 1])
-    with header_count:
-        st.markdown(f"**{len(files)} file{'s' if len(files) != 1 else ''}**")
-    with header_export:
-        st.download_button(
-            "Export all",
-            data=_build_data_zip(_data_zip_signature()),
-            file_name=f"snoop-data-{date.today().isoformat()}.zip",
-            mime="application/zip",
-            icon=":material/download:",
-            key="_tables_export_all",
-            use_container_width=True,
-            help="Download every CSV in `data/tables/` as a single zip.",
-        )
-    with header_sync:
-        if has_anything_to_sync:
-            help_parts = []
-            if gs_registry:
-                help_parts.append(
-                    f"{len(gs_registry)} Google Sheet(s)"
-                )
-            if stripe_synced_keys:
-                help_parts.append(
-                    f"{len(stripe_synced_keys)} Stripe object type(s)"
-                )
-            if st.button(
-                "Sync all",
-                icon=":material/sync:",
-                key="_tables_sync_all",
-                use_container_width=True,
-                help="Re-pull every registered sync — " + " + ".join(help_parts) + ".",
-            ):
-                _do_sync_all_sources()
-                st.rerun()
+    st.markdown(f"**{len(files)} file{'s' if len(files) != 1 else ''}**")
+    st.download_button(
+        "Export all",
+        data=_build_data_zip(_data_zip_signature()),
+        file_name=f"snoop-data-{date.today().isoformat()}.zip",
+        mime="application/zip",
+        icon=":material/download:",
+        key="_tables_export_all",
+        use_container_width=True,
+        help="Download every CSV in `data/tables/` as a single zip.",
+    )
 
     chosen_name = _render_file_list_with_actions(
         files=files,
