@@ -6,17 +6,19 @@ Built for an internal finance + marketing + leadership team.
 
 ## What you get
 
-- **Ask the Snoop** — a chat that runs Python under the hood. Claude can inspect the data, write pandas, draw Plotly charts, and self-correct on errors across multiple tool calls in a single turn. Every answer is computed live from the actual data.
+- **Ask the Snoop** — a chat that runs Python under the hood. Claude can inspect the data, write pandas, draw Plotly charts, and self-correct on errors across multiple tool calls in a single turn. Every answer is computed live from the actual data, with a **confidence level** and source references appended so you know how much to trust each number.
+- **Slack bot** — `@snoop` in any Slack channel where the bot is invited and get the same answers in a thread. Runs as a separate long-lived process alongside the web app, sharing the same data + context files. See [SETUP_SLACK.md](SETUP_SLACK.md).
 - **Google Sheets live sync** — paste a sheet URL, pick a tab, and Snoop materialises it as a CSV that stays one click away from fresh. OAuth via your Workspace account; per-user tokens, shared sync registry. See setup below.
-- **Stripe live sync** — pulls customers, subscriptions, invoices, charges, products, and prices into CSVs the agent can query. Restricted API key, incremental refresh after the first pull. See setup below.
-- **Data** — drag-and-drop CSV upload, in-place row/cell editing, per-file delete. Every file gets a one-click "Context" button that opens an AI editor for its explainer doc.
-- **Context** — manage company-wide context docs (org structure, glossary, fiscal calendar, accounting conventions). General docs are always loaded into the chat; per-file docs are loaded only when the matching CSV is in scope.
+- **Stripe live sync** — pulls customers, subscriptions, invoices, charges, products, prices, balance transactions, and more into 15 CSVs the agent can query. Restricted API key, incremental refresh after the first pull. See setup below.
+- **Data** — drag-and-drop **CSV or Excel** upload (Excel workbooks open a sheet-picker dialog that turns each sheet into its own CSV). In-place row/cell editing, per-file **rename / delete / download**, **Export all** as a zip. Every file gets a one-click "Context" button.
+- **Context** — manage company-wide context docs (org structure, glossary, fiscal calendar, accounting conventions). General docs are always loaded into the chat; per-file docs are loaded only when the matching CSV is in scope. **Import from PDF / Word / plain text** — text is extracted and saved as a context doc. **Export** general docs as a zip.
+- **Schema-doc pointers** — point a CSV at a general context doc (e.g. all P&L files → `pnl.md`, all Stripe tables → `stripe.md`) and that doc becomes the canonical schema reference for those files. The agent reads it on every turn, so it knows column conventions, aggregation traps, and canonical query snippets without having to guess from raw column names.
 - **Saved Questions** — pin frequently-asked questions and replay them with one click.
 - **Agent memory** — Snoop can save durable facts the user teaches it ("fiscal year is July–June", "PR retainer isn't part of marketing spend") to a memory file that auto-loads into every future conversation. Saves are visible in the chat and editable via the Context view.
 - **Web search + fetch** — optional. Web fetch is always available so Snoop can pull any URL you mention. Web search is a toggle (off by default — costs extra per request) for when you need external info: exchange rates, industry benchmarks, news.
-- **Saved Items** — save any chart, table, full exchange, or whole conversation Claude produced. Tables can be promoted into `data/tables/` to feed the next analysis. **Save-as-report** packages a question + the assistant's response (text, charts, tables) as a self-contained HTML file you can email, archive, or open offline. **Save chat** stores the entire thread (every question + response + chart + table) so you can pick a saved conversation later and **Resume** it — loads back into the chat and you keep going.
+- **Saved Items** — save any chart, table, full exchange, or whole conversation Claude produced. Tables can be promoted into `data/tables/` to feed the next analysis. **Save-as-report** packages a question + the assistant's response (text, charts, tables) as a self-contained HTML file you can email, archive, or open offline. Saved reports also offer a **PDF download** (text + tables; charts noted as HTML-only). Result tables in chat offer **Excel download** with bold headers and auto-fitted columns. **Save chat** stores the entire thread (every question + response + chart + table) so you can pick a saved conversation later and **Resume** it.
 - **Charts demo** — a gallery of every chart type Snoop can produce, with "when to use" notes against fake P&L data.
-- **AI context editor** — modal chat that drafts a precise context doc for a CSV (or a general doc). Sees a full data fingerprint, can run pandas to verify claims, and stays consistent with the rest of your project's context.
+- **AI context editor** — modal chat that drafts a precise context doc for a CSV (or a general doc). For per-file docs it sees a full data fingerprint and can run pandas to verify claims. For general docs it can call `load_table(name, nrows=20)` to inspect any CSV on demand — useful when writing group docs that span many files.
 - **Scope picker** — narrow the conversation to a subset of CSVs to keep the system prompt lean and the agent focused.
 - **Token + cost meter** in the sidebar, **Quick mode** (force Haiku for cheap lookups), **Prefer charts** (auto-chart when the answer has 3+ comparable values), and a **Stop** button for runaway agent loops.
 
@@ -53,25 +55,31 @@ Click **Settings** in the sidebar, paste your Anthropic API key, save, and ask y
 ```
 snoop-doc/
 ├── app.py                # Streamlit entry point: UI, sidebar, agent loop, view routing
-├── tools.py              # run_python tool + CSV discovery + execution sandbox
+├── snoop_agent.py        # Headless version of the agent loop — used by slack_bot.py + future integrations
+├── slack_bot.py          # @snoop Slack bot (Socket Mode); run as a separate long-lived process
+├── SETUP_SLACK.md        # Step-by-step Slack bot setup guide
+├── tools.py              # run_python tool + CSV discovery + execution sandbox + general-doc sandbox helper
 ├── memory.py             # save_memory tool + memory.md writer
 ├── gsheets.py            # Google Sheets OAuth + sync to data/tables/
-├── stripe_sync.py        # Stripe sync: 7 CSVs (customers, subs, invoices, charges, …)
-├── context_chat.py       # AI editor for context docs (table mode + general mode)
-├── context_browser.py    # "Context" view — general context docs
-├── data_browser.py       # "Data" view — CSVs (incl. Google Sheets + Stripe sync)
+├── stripe_sync.py        # Stripe sync: 15 CSVs (customers, subs, invoices, charges, payment intents, balance transactions, …)
+├── context_chat.py       # AI editor for context docs (table mode + general mode w/ load_table)
+├── context_browser.py    # "Context" view — general context docs + import (PDF/Word/text) + export
+├── context_pointers.py   # YAML frontmatter parser + schema-doc pointer map (CSV → general doc)
+├── data_browser.py       # "Data" view — CSVs, Google Sheets + Stripe sync UI, rename, export all, per-row download
 ├── data_fingerprint.py   # Profiler that summarises a CSV for the context editor
+├── doc_import.py         # PDF / Word / Excel text + sheet extraction
+├── doc_export.py         # Excel + PDF generation for chat tables and saved reports
 ├── saved_questions.py    # "Saved Questions" view
-├── saved_items.py        # "Saved Items" view — charts, tables, reports
+├── saved_items.py        # "Saved Items" view — charts, tables, reports, conversations
 ├── reports.py            # Render a chat exchange → self-contained HTML report
 ├── chart_demo.py         # "Charts demo" view + fake P&L data (sandbox fallback)
 ├── dialogs.py            # Shared confirm-or-run helper
 ├── theme.py              # Plotly template, CSS, icon map, logo install
 ├── prompts/system.md     # Main agent system prompt
 ├── data/
-│   ├── tables/                 # ← drop CSVs here (also: synced sheets land here)
+│   ├── tables/                 # ← drop CSVs here (also: synced sheets + Stripe land here)
 │   ├── context/                # ← Markdown context docs
-│   │   ├── *.md                  —  general (company-wide, always loaded)
+│   │   ├── *.md                  —  general (company-wide, always loaded; can carry `covers: [...]` frontmatter)
 │   │   └── tables/*.md           —  doc-related, one per CSV (scope-filtered)
 │   ├── sheets-registry.json    # Google Sheets sync registry (committed)
 │   └── stripe-registry.json    # Stripe sync registry (committed)
@@ -124,7 +132,7 @@ Snoop can pull a tab from any Google Sheet you have access to and materialise it
 
 ## Stripe live sync
 
-Snoop can pull your Stripe data into twelve CSVs in `data/tables/`:
+Snoop can pull your Stripe data into fifteen CSVs in `data/tables/`:
 
 **Core data**
 | CSV | Grain |
@@ -139,6 +147,7 @@ Snoop can pull your Stripe data into twelve CSVs in `data/tables/`:
 | `stripe_refunds.csv` | one row per refund |
 | `stripe_disputes.csv` | one row per dispute / chargeback |
 | `stripe_payouts.csv` | one row per payout to your bank |
+| `stripe_balance_transactions.csv` | one row per money-movement event Stripe records on the account balance — the universal "what hit the balance, in settlement currency" record. `amount`, `net`, `fee` are always in the account's settlement currency regardless of the source object's currency (Stripe does the FX at transaction time, so no FX table is needed). `source` joins to charges / refunds / disputes / payouts via the `ch_…` / `pyr_…` / `du_…` / `po_…` id prefix |
 
 **Reference tables**
 | CSV | Grain |
@@ -148,7 +157,9 @@ Snoop can pull your Stripe data into twelve CSVs in `data/tables/`:
 | `stripe_coupons.csv` | discount definitions |
 | `stripe_promotion_codes.csv` | redeemable codes that map to coupons |
 
-The agent joins these in pandas at query time. Typical questions answerable from this data: MRR / ARR, the MRR movement waterfall (new / expansion / contraction / churn), renewal cohort analysis, top customers by ARR, NRR by cohort, cash collections, failed-payment / involuntary-churn rate, plan-mix shifts, ACV by product, refund rate by product, chargeback / dispute trends, effective discount % from coupons, payout timing for cash forecasting, and proration revenue from invoice line items.
+The agent joins these in pandas at query time. Typical questions answerable from this data: MRR / ARR, the MRR movement waterfall (new / expansion / contraction / churn), renewal cohort analysis, top customers by ARR, NRR by cohort, cash collections, failed-payment / involuntary-churn rate, plan-mix shifts, ACV by product, refund rate by product, chargeback / dispute trends, effective discount % from coupons, payout timing for cash forecasting, proration revenue from invoice line items, and accurate **multi-currency reporting** via balance transactions (always in settlement currency).
+
+If you ever swap the Stripe API key for a different account, run `python _cleanup_old_account.py` to drop rows from the previous account that the incremental-sync merge would otherwise keep around. The Data view's **Force full re-sync** button resets the incremental cursors so historical data on a new account gets re-pulled.
 
 ### One-time setup (per Snoop install)
 
@@ -175,6 +186,55 @@ After the first pull, every subsequent sync is **incremental** (only objects cre
 - Synced CSVs are **read-only** in the in-app editor. Stripe is the source of truth.
 - The agent sees the same staleness bands as Google Sheets (`fresh` / `stale` / `old`) per file.
 - Errors (auth failure, rate limit, etc.) show inline on the failed row; other objects sync independently.
+
+## Slack bot
+
+Snoop can also be invoked as `@snoop` in any Slack channel where the bot is invited. It runs as a separate long-lived Python process alongside the web app, sharing the same `data/` and `data/context/` directories. Same Claude agent, same answers — just in Slack threads instead of the Streamlit chat.
+
+Two processes, one disk: the web app and the Slack bot are independent. They share state by reading the same CSVs and context docs from disk.
+
+See **[SETUP_SLACK.md](SETUP_SLACK.md)** for the full step-by-step setup. Quick version:
+
+```bash
+# Once: create a Slack app, enable Socket Mode, copy the xoxb- + xapp- tokens
+#       into Snoop → Integrations → Slack
+# Each time you want the bot running:
+python slack_bot.py
+```
+
+Wrap in `screen`, `nohup`, or `pm2` to keep it running after you close the terminal.
+
+Behaviour:
+- Tables format as fixed-width code blocks (Slack renders them in monospace).
+- Plotly charts can't be embedded in Slack — the bot notes when a chart was generated and points back to the web app.
+- Threading carries multi-turn context: reply in a thread to continue the conversation.
+
+## Document import & export
+
+**Importing data:**
+- The **Upload a data file** button in the Data view accepts `.csv`, `.xlsx`, and `.xls`. Excel workbooks open a sheet-picker dialog letting you turn each sheet into its own CSV in `data/tables/`.
+
+**Importing context:**
+- The Context view's upload accepts `.md` directly, plus **PDF, Word (.docx), and plain text** — text is extracted automatically and saved as a context doc. Preview the extracted text before saving.
+
+**Exporting data:**
+- **Export all** (Data view header) — every CSV in `data/tables/` zipped as `snoop-data-YYYY-MM-DD.zip`.
+- **Per-row Download** icon on each CSV row.
+- **Excel download** on result tables in chat and Saved Items — bold headers, auto-fitted columns.
+
+**Exporting reports:**
+- Saved reports offer both an HTML download (the self-contained file) and a **PDF download** (text + tables; Plotly charts are noted as HTML-only).
+
+## Schema-doc pointers
+
+If you have many CSVs that share a schema (e.g. several years of P&L; the 15 Stripe tables), write one general context doc per group (`pnl.md`, `stripe.md`, etc.) and **point** each CSV at it from the Data view's Context dialog. The pointer lives in the general doc's YAML frontmatter as a `covers: [filename1, filename2]` list.
+
+What it does:
+- The doc loads into the agent's system prompt on every turn (because it's a general doc).
+- The `run_python` tool description renders a `schema: pnl.md` line next to each pointed CSV, so the agent knows which doc to consult.
+- One curated group doc replaces having to describe each file's schema separately — useful when column names are messy or inconsistent across files of the same kind.
+
+The Context dialog also still supports a per-file individual context doc for one-off quirks that don't belong in the shared group doc.
 
 ## Configuring the chat
 

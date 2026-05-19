@@ -39,17 +39,23 @@ Claude can call the tool multiple times in a single question (e.g. peek at the d
 ```
 snoop-doc/
 ├── app.py              # Streamlit app: UI, sidebar, agent loop, view routing
-├── tools.py            # run_python tool + execution sandbox + CSV discovery
+├── snoop_agent.py      # Headless version of the agent loop — used by slack_bot.py + future integrations
+├── slack_bot.py        # @snoop Slack bot (Socket Mode); separate long-lived process
+├── SETUP_SLACK.md      # Step-by-step Slack bot setup guide
+├── tools.py            # run_python tool + execution sandbox + CSV discovery + general-doc sandbox helper
 ├── memory.py           # save_memory tool + memory.md writer
 ├── gsheets.py          # Google Sheets OAuth + sync-to-CSV + sync registry
-├── stripe_sync.py      # Stripe sync: 7 CSVs (customers, subs, invoices, charges, …)
+├── stripe_sync.py      # Stripe sync: 15 CSVs (customers, subs, invoices, charges, PIs, balance transactions, …)
 ├── chart_demo.py       # Sample charts in the "Charts demo" view + fake data
-├── data_browser.py     # "Data" view — browse/edit/upload/delete + Google Sheets sync UI
-├── context_browser.py  # "Context" view — manage general (company-wide) context docs
-├── context_chat.py     # AI chat dialog for building/editing context docs (dual mode)
+├── data_browser.py     # "Data" view — browse/edit/upload/delete/rename/download + Google Sheets + Stripe sync UI
+├── context_browser.py  # "Context" view — manage general docs + import (PDF/Word/text) + export
+├── context_chat.py     # AI chat dialog for building/editing context docs (table mode + general w/ load_table)
+├── context_pointers.py # YAML frontmatter parser + schema-doc pointer map (CSV → general doc)
 ├── data_fingerprint.py # CSV profiler — feeds rich data summary to the context chat
+├── doc_import.py       # PDF / Word / Excel text + sheet extraction
+├── doc_export.py       # Excel + PDF generation for chat tables and saved reports
 ├── saved_questions.py  # "Saved Questions" view — manage pinned prompts
-├── saved_items.py      # "Saved Items" view — store + browse charts/tables/reports
+├── saved_items.py      # "Saved Items" view — store + browse charts/tables/reports/conversations
 ├── reports.py          # Render one chat exchange → self-contained HTML report
 ├── dialogs.py          # Shared confirm-or-run helper used across views
 ├── theme.py            # Plotly template + CSS + icon map + logo install
@@ -64,7 +70,7 @@ snoop-doc/
 ├── data/
 │   ├── tables/                # Real CSVs go here (manual uploads + synced sheets)
 │   ├── context/               # Markdown context docs:
-│   │   ├── *.md                 —  general docs (always loaded into main chat)
+│   │   ├── *.md                 —  general docs (always loaded into main chat; can carry `covers: [...]` frontmatter)
 │   │   └── tables/*.md          —  doc-related docs (one per CSV, scope-filtered)
 │   ├── sheets-registry.json   # Google Sheets sync registry (committed, shared via git)
 │   └── stripe-registry.json   # Stripe sync registry (committed, shared via git)
@@ -490,7 +496,7 @@ Roughly in priority order.
 - [x] **Visual redesign — first pass.** ✓ Stripe-modern direction: light theme, indigo primary, charcoal text, off-white sidebar. Emojis replaced with Material Icons. Theme lives in `.streamlit/config.toml` + `theme.py`.
 - [x] **Chart theme / branding.** ✓ Plotly template defined in `theme.py` and applied globally — every chart (demo + AI-generated) uses the same palette and typography.
 - [x] **Logo in sidebar.** ✓ `assets/logo.svg` is rendered next to the "Snoop Doc" wordmark via `theme.render_sidebar_header()`.
-- [ ] **Export.** Buttons to download any chart as PNG and any answer as PDF / Markdown.
+- [x] **Export.** ✓ Excel-download on any result table in chat + Saved Items. PDF-download on saved reports (text + tables; charts are HTML-only). Per-row CSV download + Export-all-as-zip on the Data view header. PNG-only chart export still pending.
 - [x] **Saved questions.** ✓ Add/edit/delete in the Saved Questions view; quick-pick dropdown above the chat input on the chat view.
 - [ ] **Better error UX.** When the model can't answer (missing data, ambiguous question), give a structured "here's why" response.
 - [ ] **Anomaly scan.** "Show me anything unusual in the last month" runs a sweep across tables.
@@ -499,7 +505,7 @@ Roughly in priority order.
 - [x] **Google Sheets live sync.** ✓ OAuth via Workspace-internal Desktop client, per-user tokens, shared sync registry, per-row + sync-all + sync-on-start. Read-only enforcement on synced CSVs.
 - [x] **Stripe live sync.** ✓ Restricted API key, thirteen CSVs (customers / subs / sub_items / invoices / invoice_line_items / payment_intents / charges / refunds / disputes / payouts / products / prices / coupons / promotion_codes), initial full pull + incremental refresh via `created[gte]`. Sync registry + same per-row UI as Google Sheets. Sync-on-app-start toggle gated to "only after first manual sync" so the 25-min initial pull never surprises anyone at launch. On 2026-05-18 we briefly swapped Charges for PaymentIntents on the assumption that modern accounts no longer populate `Charge.list` — turns out both have data on the test account (411 PIs / 284 Charges), and the two views differ in useful ways (Charges has roll-up fields PI doesn't), so we kept both.
 
-- [ ] **Evaluate adding Stripe Balance Transactions.** Balance Transactions is Stripe's actual financial ledger — every money movement on the account (each charge, each refund, each fee, each payout adjustment, each chargeback). What finance teams usually mean when they say "transactions". Carries `fee` and `fee_details` which **no other Stripe object exposes** — Payment Intents and Charges don't directly show what Stripe took. Decision deferred until we have a concrete question that needs it; the candidates: *"What were our Stripe fees this quarter?"*, *"Reconcile our bank statement with Stripe — show me every credit / debit with running net."*, *"True net revenue after Stripe's cut."* If any of those is a recurring ask, add `stripe_balance_transactions.csv` (one row per transaction, fields: id, type — charge/refund/payout/fee/adjustment, amount, fee, net, currency, created, available_on, source — id of the related object, payout — id of the payout it was settled into). Volume: ~2–5x the charges/payment_intents count (one bt per charge + one per fee + one per refund + one per payout adjustment) — for a 25k-sub account roughly 0.5M–1M rows. Pandas territory; would want Parquet over CSV if it grew much larger. Same `stripe_sync.py` pattern: add an `ObjectSpec`, a `_flatten_balance_transaction`, an `elif key == "balance_transactions"` fetch branch, append to `SYNC_ORDER`. ~1–2 hours of work.
+- [x] **Stripe Balance Transactions.** ✓ Added as `stripe_balance_transactions.csv` (the 15th Stripe table). One row per money-movement event Stripe records on the account balance — charges, refunds, fees, payouts, adjustments, contributions, application_fee earnings. Crucial for multi-currency reporting because `amount`, `net`, and `fee` are always in the account settlement currency regardless of the source object's currency (Stripe does FX conversion at transaction time, so no local FX table is needed). `source` joins to charges / refunds / disputes / payouts via the `ch_…` / `pyr_…` / `du_…` / `po_…` id prefix. Synced incrementally, sits last in `SYNC_ORDER` since it references every preceding money-moving table.
 
 - [ ] **FastSpring live sync.** Adds FastSpring as a parallel sync source to Stripe — same `<platform>_sync.py` template. Auth: HTTP Basic Auth (API username + password from FastSpring dashboard → Integrations → API Credentials). Endpoints to pull, mapping to roughly:
   - `/accounts` → `fastspring_accounts.csv` (customers)
@@ -546,7 +552,11 @@ Roughly in priority order.
 ### Maybe later
 - [ ] User registration + per-user API keys (currently single-user).
 - [ ] Spreadsheet sync (Google Sheets / Excel auto-pull on update).
-- [ ] Slack / Teams bot wrapper.
+- [x] **Slack bot wrapper.** ✓ `@snoop` mentions in any channel where the bot is invited. Socket Mode (no public URL needed). See `SETUP_SLACK.md`. Separate long-lived `slack_bot.py` process sharing `data/` + `data/context/` with the web app via the headless `snoop_agent.py` core. Plotly charts can't render in Slack — bot mentions the chart and points back to the web app.
+- [ ] **Slack chart upload.** Render Plotly figures to PNG (e.g. via kaleido) and upload them to the thread so charts work natively in Slack.
+- [ ] Teams bot wrapper (same `snoop_agent.py` core, MS Graph + Bot Framework instead of Slack Bolt).
+- [ ] **Per-table force re-sync.** Today the only "force" path nukes every incremental cursor at once. A small icon button per row (next to Sync) would let users surgically re-pull just one table — useful after fixing a flattener or after correcting a single bad sync.
+- [ ] **Group / folder organisation in the Data view.** With ~80 tables in the demo set, the flat row list gets long. Cleanest design: group by schema-doc pointer (files pointed at `pnl.md` get a "P&L" section, etc.), reusing the pointer system as the organisation signal. Files with no pointer fall into an "Ungrouped" group — a nudge to fill pointers. ~30 lines in `data_browser.py`; the pointer map is already computed per render.
 - [ ] Scheduled email digests of saved questions.
 - [ ] Audit log of every question + answer.
 - [ ] Deploy to a real host (Vercel / Railway / Hugging Face Spaces).
@@ -574,3 +584,17 @@ Quick record of choices we made and why, so we don't relitigate them.
 - **Stripe sync registry per-object, not per-file.** Could have keyed the registry by target filename (matching the Sheets sync pattern), but the per-object key is clearer because (a) Stripe's data model has a fixed schema we ship, not user-chosen filenames, and (b) the per-object dimension is where the incremental cursor naturally lives. Filename ↔ object mapping is a simple `f"stripe_{key}.csv"` helper.
 - **Stripe sync-on-start is gated on prior sync, not just the toggle.** Without the gate, flipping the toggle and restarting the app could trigger a 25-minute initial sync at launch — terrible UX. The toggle is a no-op until at least one object has been synced manually first; from that point on, all syncs are incremental seconds. Documented in the toggle's help text.
 - **Stay on Desktop OAuth client for now; defer Web client until deployment.** Three deployment shapes considered: (1) self-hosted single-instance for the team — needs Web OAuth client, app-level auth, token storage in a DB; estimate 2–3 focused weeks. (2) multi-tenant SaaS — months of work, essentially a product rewrite. (3) packaged desktop app via `stlite` / PyInstaller — keeps Desktop OAuth as-is, packaging weekend. Picked: stay local on Desktop OAuth. Decision to revisit once there's a concrete deployment requirement (URL someone outside this laptop should hit). The migration is bounded — only `gsheets.connect()` + token storage change; the rest of the app is unaffected.
+
+- **Stripe API field migrations — `_<thing>_<field>(obj)` helper pattern.** Mid-2026 Stripe moved a number of reference fields off the top-level resource into nested `parent.<*_details>` or `pricing.price_details` blocks (an early step in their move toward polymorphic resource shapes). On modern API versions the legacy top-level fields return `None` even when the underlying data exists. Affected fields we hit so far: `invoice.subscription`, `line_item.{subscription, price, product, proration, type}`, `subscription.{current_period_start, current_period_end, discounts}`, `promotion_code.coupon`, `payment_intent.invoice` (moved to `payment_details.order_reference`), `dispute.network_reason_code` (now per payment method type), and `charge.invoice` (removed entirely — derive via `payment_intent_id`). Solution pattern: one helper per migrated field, e.g. `_invoice_subscription_id(inv)`, that tries the new path first and falls back to the legacy field. A small `_nested(obj, *keys)` walker handles StripeObject-vs-plain-dict shape mismatch at every level since the SDK returns either. Keep the CSV column name stable; the helper absorbs the migration so downstream queries are unaffected. **Audit script:** `_diag_stripe_audit.py` samples 10 records per resource and prints per-column "populated rate" plus a raw `_data` dump for any always-null field — that's how we find the next migration before it bites in a query. Decision: don't try to read Stripe's announcements; instead, re-run the audit any time a CSV column "looks wrong".
+
+- **Headless agent core (`snoop_agent.py`).** When wiring the Slack bot, the obvious approach is to import the agent loop from `app.py`. Problem: `app.py` is full of Streamlit calls (`st.session_state`, `st.write`, `st.toast`, etc.) that have no meaning in a non-Streamlit process. Picked: extract the agent loop into `snoop_agent.py` — same Claude tool loop (run_python + memory + web_fetch + optional web_search), same system-prompt assembly, same context-doc loading, but no Streamlit. The Streamlit app still runs its richer real-time UI version in `app.py`; `snoop_agent.py` is the path for any non-Streamlit caller (Slack today, possibly Discord / CLI / API server tomorrow). Worth noting: the two loops will drift over time — system prompt assembly + tool list construction should ideally live in one place. Refactor candidate when there are three or more callers.
+
+- **Slack bot via Socket Mode, not webhooks.** Slack Apps support two transports for events: HTTP webhooks (Slack POSTs to a public URL we expose) and Socket Mode (we open a WebSocket to Slack and they push events down it). Picked Socket Mode because (a) Snoop runs on a laptop / private server, not behind a public URL — webhooks would require tunneling or hosting; (b) it removes a whole category of "is the callback URL reachable / signed correctly?" debugging; (c) the trade-off (need to keep a process running) is the same problem we'd have with webhooks anyway. The `xapp-` App-Level Token is the price of admission for Socket Mode.
+
+- **Schema-doc pointers as YAML frontmatter on the target doc, not as a separate metadata file or a code-side prefix map.** Considered three places to store "this CSV is documented by this general doc": (1) a `data/context/pointers.json` mapping, (2) frontmatter `--- covers: [filename1, filename2] ---` on the general doc itself, (3) a prefix-based map in `tools.py` (e.g. `stripe_*` → `stripe.md`). Picked (2). (1) adds a separate file to keep in sync and drifts silently. (3) couples organisation to filename conventions and breaks when names don't follow a pattern. (2) keeps the doc self-describing: the pointer relationship lives next to the thing it's about, the UI rewrites the array on rename / set / clear, and the agent never sees the YAML (it's stripped before the body flows into the system prompt). Side effect: a CSV rename has to cascade into the `covers:` lists of every general doc that mentions it — handled by `context_pointers.rename_csv`.
+
+- **Multi-currency reporting via Stripe Balance Transactions, not a local FX table.** Considered three approaches: (1) define a fixed company FX rate somewhere — goes stale, picks up "what rate did we use?" arguments. (2) Fetch live rates via `web_fetch` at query time — fine for forecasting but wrong for historical reporting because today's rate doesn't reflect what we got two years ago. (3) Use `stripe_balance_transactions.csv` where `amount` and `net` are already in the account settlement currency — Stripe did the FX at transaction time, using their live rate at that exact moment. Picked (3) as the default for "real revenue" reporting; (2) is OK for forward-looking projections; (1) is explicitly avoided.
+
+- **Document import: extract text at import time, not on every query.** PDF / Word / plain text uploaded in the Context view are extracted to text (via `pypdf` / `python-docx`) and saved as `.md` files. Considered keeping the original PDF and extracting on every agent turn — rejected because (a) the text extraction is expensive on every render, (b) the original PDF has tons of layout junk that doesn't belong in a context doc, and (c) the user can review and edit the extracted text before saving, which is exactly the right point to enforce quality. Excel imports follow the same shape: each sheet becomes its own CSV at import time, not a "live workbook" reference.
+
+- **Slack bot as a separate process, not a thread inside the Streamlit app.** Streamlit's runtime is single-threaded and ties the event loop to user sessions. Running a Slack bot inside it would compete for the same scheduler and would die any time the Streamlit page reloads or restarts. Two separate processes sharing the `data/` directory is dramatically cleaner: each can crash and restart independently, the bot keeps running while the user is asleep, and there's zero coupling between the UI and the bot transport.
